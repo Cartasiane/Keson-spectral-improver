@@ -470,12 +470,7 @@ function formatUserFacingError(error) {
     return error.userMessage
   }
 
-  const reason = extractReadableErrorText(error)
-  if (reason) {
-    return `Sorry, I couldn't download that track: ${reason}`
-  }
-
-  return 'dsl je trouve pas ton bail, check le lien.'
+  return 'dsl je trouve pas ton bail, check ton lien.'
 }
 
 function extractReadableErrorText(error) {
