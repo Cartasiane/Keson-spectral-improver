@@ -1,0 +1,19 @@
+{
+  "name": "keson-spectral-improver",
+  "version": "1.0.0",
+  "description": "Telegram bot that downloads SoundCloud tracks via yt-dlp",
+  "main": "src/bot.js",
+  "scripts": {
+    "start": "node src/bot.js",
+    "lint": "node --check src/bot.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "grammy": "^1.38.3",
+    "yt-dlp-exec": "^1.0.2"
+  }
+}
