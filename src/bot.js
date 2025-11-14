@@ -52,7 +52,7 @@ const bot = new Bot(BOT_TOKEN)
 const authorizedUsers = new Set()
 const awaitingPassword = new Set()
 let persistAuthorizedUsersTimer
-const SOUND_CLOUD_REGEX = /(https?:\/\/(?:m\.)?soundcloud\.com\/[\w\-./?=&%+#]+)/i
+const SOUND_CLOUD_REGEX = /(https?:\/\/(?:[\w-]+\.)?soundcloud\.com\/[\w\-./?=&%+#]+)/i
 
 bot.api
   .setMyCommands([{ command: 'start', description: 'Show bot instructions' }])
