@@ -98,15 +98,13 @@ bot.on('message:text', async ctx => {
     return
   }
 
-  await ctx.reply('ça taff')
+  await ctx.reply('exspectro partronumb')
 
   try {
     await downloadQueue.add(() => handleDownloadJob(ctx, url))
   } catch (error) {
     console.error('Download failed:', error)
-    const message =
-      error?.stderr || error?.message || 'An unexpected error occurred while downloading.'
-    await ctx.reply(`Could not download audio: ${message}`)
+    await ctx.reply(formatUserFacingError(error))
   }
 })
 
@@ -134,7 +132,7 @@ async function handleDownloadJob(ctx, url) {
     if (stats.size > TELEGRAM_MAX_FILE_BYTES) {
       const sizeMb = (stats.size / (1024 * 1024)).toFixed(2)
       await ctx.reply(
-        `Fichier trop gros dsl bb`
+        `Ton son est trop gros bb :( telegram a la flemmmmme`
       )
       return
     }
@@ -173,7 +171,10 @@ async function downloadTrack(url) {
 
   const files = await fsp.readdir(tmpDir)
   if (!files.length) {
-    throw new Error('Download completed but no files were found.')
+    const err = new Error('SoundCloud returned no downloadable audio for this link.')
+    err.userMessage =
+      'SoundCloud did not provide an audio file for that link. Please try another track.'
+    throw err
   }
 
   const { audioFile, metadata } = await pickAudioFile(tmpDir, files)
@@ -304,14 +305,14 @@ async function downloadWithRedirects(url, filePath, attempt = 0) {
 }
 
 function buildCaption(metadata) {
-  if (!metadata) return 'Here is your track. Enjoy!'
+  if (!metadata) return 'Enjoy bb!'
   const title = metadata.title || metadata.fulltitle
   const artist = metadata.uploader || metadata.artist
   if (title && artist) {
     return `${artist} – ${title}`
   }
   if (title) return title
-  return 'Here is your track. Enjoy!'
+  return 'enjpoy bb!'
 }
 
 async function pickAudioFile(tmpDir, files) {
@@ -442,9 +443,9 @@ async function handlePasswordFlow(ctx, userId) {
       awaitingPassword.delete(userId)
       authorizedUsers.add(userId)
       scheduleAuthorizedPersist()
-      await ctx.reply('Access granted. Send a SoundCloud link to start downloading.')
+      await ctx.reply('bravo t kool')
     } else {
-      await ctx.reply('Incorrect password. Please try again:')
+      await ctx.reply('pas le bon mdp lol')
       awaitingPassword.add(userId)
     }
     return
@@ -455,11 +456,64 @@ async function handlePasswordFlow(ctx, userId) {
 
 async function promptForPassword(ctx, userId) {
   awaitingPassword.add(userId)
-  await ctx.reply('Please provide the shared password to unlock downloads:')
+  await ctx.reply('mdp stp bb')
 }
 
 function isBotCommand(ctx) {
   const entities = ctx.message.entities
   if (!entities) return false
   return entities.some(entity => entity.type === 'bot_command' && entity.offset === 0)
+}
+
+function formatUserFacingError(error) {
+  if (error?.userMessage) {
+    return error.userMessage
+  }
+
+  const reason = extractReadableErrorText(error)
+  if (reason) {
+    return `Sorry, I couldn't download that track: ${reason}`
+  }
+
+  return 'dsl je trouve pas ton bail, check le lien.'
+}
+
+function extractReadableErrorText(error) {
+  const candidates = []
+  if (typeof error === 'string') candidates.push(error)
+  if (typeof error?.message === 'string') candidates.push(error.message)
+  if (typeof error?.stderr === 'string') candidates.push(error.stderr)
+  if (typeof error?.stdout === 'string') candidates.push(error.stdout)
+
+  for (const text of candidates) {
+    const cleaned = pickUserFriendlyLine(text)
+    if (cleaned) return cleaned
+  }
+  return null
+}
+
+function pickUserFriendlyLine(text) {
+  if (!text) return null
+  const errorMatch = text.match(/ERROR:\s*(.+)/i)
+  if (errorMatch) {
+    return truncate(errorMatch[1])
+  }
+
+  const lines = text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(line =>
+      !line.startsWith('Traceback') &&
+      !line.startsWith('File "') &&
+      !line.startsWith('at ')
+    )
+
+  if (!lines.length) return null
+  return truncate(lines[0])
+}
+
+function truncate(text, max = 140) {
+  if (text.length <= max) return text
+  return `${text.slice(0, max - 1)}…`
 }
