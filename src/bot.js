@@ -60,8 +60,7 @@ bot.api
 
 bot.command('start', async ctx => {
   await ctx.reply(
-    'Send me a public SoundCloud track/playlist URL and I will send you back the audio.\n' +
-      'When prompted, reply with the shared password so I can unlock downloads for you.'
+    'Cc, je suis là pour que le spectre de tes tracks soit autant large que le tien!'
   )
 
   const userId = ctx.from?.id
@@ -95,11 +94,11 @@ bot.on('message:text', async ctx => {
 
   const url = extractSoundCloudUrl(ctx.message.text)
   if (!url) {
-    await ctx.reply('Send a valid SoundCloud URL to download its audio.')
+    await ctx.reply('Balance un lien soundcloud valide bb')
     return
   }
 
-  await ctx.reply('Working on it. Downloading from SoundCloud, please wait...')
+  await ctx.reply('ça taff')
 
   try {
     await downloadQueue.add(() => handleDownloadJob(ctx, url))
@@ -135,7 +134,7 @@ async function handleDownloadJob(ctx, url) {
     if (stats.size > TELEGRAM_MAX_FILE_BYTES) {
       const sizeMb = (stats.size / (1024 * 1024)).toFixed(2)
       await ctx.reply(
-        `The downloaded file is ${sizeMb} MB, which exceeds Telegram's 50 MB upload limit. Try a shorter track or download it manually.`
+        `Fichier trop gros dsl bb`
       )
       return
     }
