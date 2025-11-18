@@ -41,6 +41,7 @@ const IDHS_SUPPORTED_HOSTS = [
   /youtu\.be/i
 ]
 const ENABLE_QUALITY_ANALYSIS = process.env.ENABLE_QUALITY_ANALYSIS !== 'false'
+const QUALITY_ANALYSIS_DEBUG = process.env.QUALITY_ANALYSIS_DEBUG === 'true'
 const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg'
 const QUALITY_RMS_THRESHOLD_DB = Number(process.env.QUALITY_RMS_THRESHOLD_DB || -55)
 const QUALITY_FREQ_STEPS = [
@@ -305,12 +306,17 @@ function httpJsonRequest(targetUrl, body, timeoutMs) {
 async function analyzeTrackQuality(filePath) {
   if (!FFMPEG_PATH) return null
   let selected = null
+  qualityDebug('Starting quality probe for:', filePath)
+  qualityDebug('Using frequency steps:', QUALITY_FREQ_STEPS)
 
   for (const step of QUALITY_FREQ_STEPS) {
+    qualityDebug(`Measuring RMS above ${step.freq} Hz`)
     const rms = await measureHighFreqEnergy(filePath, step.freq)
     if (rms === null) {
+      qualityDebug(`Measurement failed for ${step.freq} Hz; aborting.`)
       return null
     }
+    qualityDebug(`RMS for ${step.freq} Hz: ${rms} dB`)
     if (rms > QUALITY_RMS_THRESHOLD_DB) {
       const label = messages.qualityLabel(step.labelKey)
       selected = {
@@ -318,11 +324,13 @@ async function analyzeTrackQuality(filePath) {
         rating: step.rating,
         text: `~${(step.freq / 1000).toFixed(1)} kHz (${label})`
       }
+      qualityDebug('Selected tier:', selected)
       break
     }
   }
 
   if (!selected) {
+    qualityDebug('No tier matched; using fallback label.')
     return {
       cutoffHz: 0,
       rating: 'très basse',
@@ -335,6 +343,7 @@ async function analyzeTrackQuality(filePath) {
 
 function measureHighFreqEnergy(filePath, cutoffHz) {
   return new Promise(resolve => {
+    qualityDebug(`Spawning ffmpeg for cutoff ${cutoffHz} Hz`) 
     const args = [
       '-v', 'error',
       '-hide_banner',
@@ -354,21 +363,25 @@ function measureHighFreqEnergy(filePath, cutoffHz) {
 
     child.on('error', error => {
       console.warn('Unable to start ffmpeg for quality probe:', error)
+      qualityDebug('ffmpeg spawn error:', error)
       resolve(null)
     })
 
     child.on('close', code => {
       if (code !== 0) {
         console.warn(`ffmpeg quality probe failed (code ${code})`)
+        qualityDebug(`ffmpeg exited with code ${code}`)
         resolve(null)
         return
       }
       const matches = [...stderr.matchAll(/Overall\.RMS_level:\s*(-?\d+(?:\.\d+)?)/g)]
       if (!matches.length) {
+        qualityDebug('No RMS matches in ffmpeg stderr output')
         resolve(null)
         return
       }
       const rms = Number(matches[matches.length - 1][1])
+      qualityDebug('Parsed RMS value:', rms)
       resolve(Number.isFinite(rms) ? rms : null)
     })
   })
@@ -387,10 +400,19 @@ async function handleDownloadJob(ctx, url) {
     let qualityInfo = null
     if (ENABLE_QUALITY_ANALYSIS) {
       try {
+        qualityDebug('Running quality analysis for file:', download.filename)
         qualityInfo = await analyzeTrackQuality(download.path)
+        if (qualityInfo) {
+          qualityDebug('Quality analysis finished:', qualityInfo)
+        } else {
+          qualityDebug('Quality analysis returned null; using fallback caption text.')
+        }
       } catch (error) {
         console.warn('Quality analysis failed:', error)
+        qualityDebug('Quality analysis threw error:', error)
       }
+    } else if (QUALITY_ANALYSIS_DEBUG) {
+      qualityDebug('Quality analysis disabled via ENABLE_QUALITY_ANALYSIS=false; skipping probe.')
     }
 
     const inputFile = new InputFile(fs.createReadStream(download.path), download.filename)
@@ -921,4 +943,9 @@ function readPositiveInt(value, fallback) {
     return parsed
   }
   return fallback
+}
+
+function qualityDebug(...args) {
+  if (!QUALITY_ANALYSIS_DEBUG) return
+  console.debug('[quality]', ...args)
 }
