@@ -343,10 +343,10 @@ async function analyzeTrackQuality(filePath) {
 
 function measureHighFreqEnergy(filePath, cutoffHz) {
   return new Promise(resolve => {
-    qualityDebug(`Spawning ffmpeg for cutoff ${cutoffHz} Hz`) 
+    qualityDebug(`Spawning ffmpeg for cutoff ${cutoffHz} Hz`)
     const args = [
-      '-v', 'error',
       '-hide_banner',
+      '-loglevel', 'info',
       '-nostats',
       '-i', filePath,
       '-filter_complex', `highpass=f=${cutoffHz},astats=metadata=1:reset=1`,
@@ -376,7 +376,8 @@ function measureHighFreqEnergy(filePath, cutoffHz) {
       }
       const matches = [...stderr.matchAll(/Overall\.RMS_level:\s*(-?\d+(?:\.\d+)?)/g)]
       if (!matches.length) {
-        qualityDebug('No RMS matches in ffmpeg stderr output')
+        qualityDebug('No RMS matches in ffmpeg stderr output; raw stderr follows:')
+        qualityDebug(stderr.slice(-2000))
         resolve(null)
         return
       }
