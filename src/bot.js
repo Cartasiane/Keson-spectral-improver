@@ -11,6 +11,8 @@ const path = require('node:path')
 const https = require('node:https')
 const { pipeline } = require('node:stream/promises')
 const http = require('node:http')
+const { spawn } = require('node:child_process')
+const messages = require('./messages')
 
 const BOT_TOKEN = process.env.BOT_TOKEN
 const SOUNDCLOUD_OAUTH_TOKEN =
@@ -37,6 +39,17 @@ const IDHS_SUPPORTED_HOSTS = [
   /youtube\.com/i,
   /youtu\.be/i
 ]
+const ENABLE_QUALITY_ANALYSIS = process.env.ENABLE_QUALITY_ANALYSIS !== 'false'
+const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg'
+const QUALITY_RMS_THRESHOLD_DB = Number(process.env.QUALITY_RMS_THRESHOLD_DB || -55)
+const QUALITY_FREQ_STEPS = [
+  { freq: 19500, labelKey: 'lossless', rating: 'haute' },
+  { freq: 18500, labelKey: 'kbps224', rating: 'haute' },
+  { freq: 17500, labelKey: 'kbps192', rating: 'moyenne' },
+  { freq: 16500, labelKey: 'kbps160', rating: 'moyenne-basse' },
+  { freq: 15500, labelKey: 'kbps128', rating: 'basse' }
+]
+const QUALITY_FALLBACK_LABEL = messages.qualityFallbackLabel()
 
 const THUMB_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp'])
 const INFO_SUFFIX = '.info.json'
@@ -73,26 +86,23 @@ bot.api
   .catch(error => console.warn('Unable to set bot commands:', error))
 
 bot.command('start', async ctx => {
-  await ctx.reply(
-    'Cc, je suis là pour que le spectre de tes tracks soit autant large que le tien!'
-  )
+  await ctx.reply(messages.startIntro())
 
   const userId = ctx.from?.id
   if (!userId) {
-    await ctx.reply('Unable to verify user id.')
+    await ctx.reply(messages.userIdMissing())
     return
   }
 
   if (authorizedUsers.has(userId)) {
-    await ctx.reply('You are already authorized—just send a SoundCloud link!')
+    await ctx.reply(messages.alreadyAuthorized())
   } else {
     await promptForPassword(ctx, userId)
   }
 })
 
 bot.command('downloads', async ctx => {
-  const plural = downloadCount === 1 ? '' : 's'
-  await ctx.reply(`j'ai déjà DL ${downloadCount} track${plural}.`)
+  await ctx.reply(messages.downloadCount(downloadCount))
 })
 
 bot.on('message:text', async ctx => {
@@ -102,7 +112,7 @@ bot.on('message:text', async ctx => {
 
   const userId = ctx.from?.id
   if (!userId) {
-    await ctx.reply('Unable to verify user id.')
+    await ctx.reply(messages.userIdMissing())
     return
   }
 
@@ -117,21 +127,21 @@ bot.on('message:text', async ctx => {
   if (!url) {
     const candidate = extractFirstUrl(messageText)
     if (candidate && isIdhsSupportedLink(candidate)) {
-      await ctx.reply('jcherche ton lien chez les autres apps, attends bb')
+      await ctx.reply(messages.conversionInProgress())
       url = await resolveLinkViaIdhs(candidate)
       if (!url) {
-        await ctx.reply("je trouve pas ce track sur soundcloud :(")
+        await ctx.reply(messages.conversionNotFound())
         return
       }
     }
   }
 
   if (!url) {
-    await ctx.reply('Balance un lien soundcloud valide bb')
+    await ctx.reply(messages.invalidSoundCloudLink())
     return
   }
 
-  await ctx.reply('exspectro partronumb')
+  await ctx.reply(messages.downloadPrep())
 
   try {
     await downloadQueue.add(() => handleDownloadJob(ctx, url))
@@ -284,6 +294,78 @@ function httpJsonRequest(targetUrl, body, timeoutMs) {
   })
 }
 
+async function analyzeTrackQuality(filePath) {
+  if (!FFMPEG_PATH) return null
+  let selected = null
+
+  for (const step of QUALITY_FREQ_STEPS) {
+    const rms = await measureHighFreqEnergy(filePath, step.freq)
+    if (rms === null) {
+      return null
+    }
+    if (rms > QUALITY_RMS_THRESHOLD_DB) {
+      const label = messages.qualityLabel(step.labelKey)
+      selected = {
+        cutoffHz: step.freq,
+        rating: step.rating,
+        text: `~${(step.freq / 1000).toFixed(1)} kHz (${label})`
+      }
+      break
+    }
+  }
+
+  if (!selected) {
+    return {
+      cutoffHz: 0,
+      rating: 'très basse',
+      text: QUALITY_FALLBACK_LABEL
+    }
+  }
+
+  return selected
+}
+
+function measureHighFreqEnergy(filePath, cutoffHz) {
+  return new Promise(resolve => {
+    const args = [
+      '-v', 'error',
+      '-hide_banner',
+      '-nostats',
+      '-i', filePath,
+      '-filter_complex', `highpass=f=${cutoffHz},astats=metadata=1:reset=1`,
+      '-f', 'null',
+      '-'
+    ]
+
+    const child = spawn(FFMPEG_PATH, args)
+    let stderr = ''
+
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString()
+    })
+
+    child.on('error', error => {
+      console.warn('Unable to start ffmpeg for quality probe:', error)
+      resolve(null)
+    })
+
+    child.on('close', code => {
+      if (code !== 0) {
+        console.warn(`ffmpeg quality probe failed (code ${code})`)
+        resolve(null)
+        return
+      }
+      const matches = [...stderr.matchAll(/Overall\.RMS_level:\s*(-?\d+(?:\.\d+)?)/g)]
+      if (!matches.length) {
+        resolve(null)
+        return
+      }
+      const rms = Number(matches[matches.length - 1][1])
+      resolve(Number.isFinite(rms) ? rms : null)
+    })
+  })
+}
+
 async function handleDownloadJob(ctx, url) {
   let download
   try {
@@ -292,15 +374,22 @@ async function handleDownloadJob(ctx, url) {
     const stats = await fsp.stat(download.path)
     if (stats.size > TELEGRAM_MAX_FILE_BYTES) {
       const sizeMb = (stats.size / (1024 * 1024)).toFixed(2)
-      await ctx.reply(
-        `Ton son est trop gros bb :( telegram a la flemmmmme`
-      )
+      await ctx.reply(messages.fileTooLarge())
       return
+    }
+
+    let qualityInfo = null
+    if (ENABLE_QUALITY_ANALYSIS) {
+      try {
+        qualityInfo = await analyzeTrackQuality(download.path)
+      } catch (error) {
+        console.warn('Quality analysis failed:', error)
+      }
     }
 
     const inputFile = new InputFile(fs.createReadStream(download.path), download.filename)
     await ctx.replyWithDocument(inputFile, {
-      caption: buildCaption(download.metadata)
+      caption: buildCaption(download.metadata, qualityInfo)
     })
   } finally {
     if (download) {
@@ -317,7 +406,7 @@ async function downloadTrack(url) {
 
   await ytdlp(url, {
     output: outputTemplate,
-    format: 'http_aac_1_0/bestaudio/best',
+    format: 'bestaudio[ext!=opus][acodec!=opus]/http_aac_1_0/bestaudio/best',
     addHeader: headers,
     noPlaylist: true,
     noCheckCertificates: true,
@@ -333,8 +422,7 @@ async function downloadTrack(url) {
   const files = await fsp.readdir(tmpDir)
   if (!files.length) {
     const err = new Error('SoundCloud returned no downloadable audio for this link.')
-    err.userMessage =
-      'SoundCloud did not provide an audio file for that link. Please try another track.'
+    err.userMessage = messages.missingAudioFile()
     throw err
   }
 
@@ -465,15 +553,20 @@ async function downloadWithRedirects(url, filePath, attempt = 0) {
   })
 }
 
-function buildCaption(metadata) {
-  if (!metadata) return 'Enjoy bb!'
+function buildCaption(metadata, qualityInfo) {
+  if (!metadata) return appendQuality(messages.captionDefault(), qualityInfo)
   const title = metadata.title || metadata.fulltitle
   const artist = metadata.uploader || metadata.artist
   if (title && artist) {
-    return `${artist} – ${title}`
+    return appendQuality(`${artist} – ${title}`, qualityInfo)
   }
-  if (title) return title
-  return 'enjpoy bb!'
+  if (title) return appendQuality(title, qualityInfo)
+  return appendQuality(messages.captionFallback(), qualityInfo)
+}
+
+function appendQuality(caption, qualityInfo) {
+  if (!qualityInfo?.text) return caption
+  return `${caption}\n${messages.qualityLine(qualityInfo.text)}`
 }
 
 async function pickAudioFile(tmpDir, files) {
@@ -488,7 +581,7 @@ async function pickAudioFile(tmpDir, files) {
     }
 
     const ext = path.extname(file).toLowerCase()
-    if (THUMB_EXTENSIONS.has(ext)) {
+    if (THUMB_EXTENSIONS.has(ext) || ext === '.opus') {
       continue
     }
 
@@ -496,7 +589,9 @@ async function pickAudioFile(tmpDir, files) {
   }
 
   if (!audioCandidates.length) {
-    throw new Error('Download finished but no audio file was located.')
+    const err = new Error('Download finished but no audio file was located.')
+    err.userMessage = messages.opusOnlyMessage()
+    throw err
   }
 
   if (infoPath) {
@@ -649,9 +744,9 @@ async function handlePasswordFlow(ctx, userId) {
       awaitingPassword.delete(userId)
       authorizedUsers.add(userId)
       scheduleAuthorizedPersist()
-      await ctx.reply('bravo t kool')
+      await ctx.reply(messages.passwordAccepted())
     } else {
-      await ctx.reply('pas le bon mdp lol')
+      await ctx.reply(messages.passwordRejected())
       awaitingPassword.add(userId)
     }
     return
@@ -662,7 +757,7 @@ async function handlePasswordFlow(ctx, userId) {
 
 async function promptForPassword(ctx, userId) {
   awaitingPassword.add(userId)
-  await ctx.reply('mdp stp bb')
+  await ctx.reply(messages.promptPassword())
 }
 
 function isBotCommand(ctx) {
@@ -676,7 +771,7 @@ function formatUserFacingError(error) {
     return error.userMessage
   }
 
-  return 'dsl je trouve pas ton bail, check ton lien.'
+  return messages.genericError()
 }
 
 function extractReadableErrorText(error) {
