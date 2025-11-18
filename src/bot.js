@@ -10,6 +10,7 @@ const os = require('node:os')
 const path = require('node:path')
 const https = require('node:https')
 const { pipeline } = require('node:stream/promises')
+const http = require('node:http')
 
 const BOT_TOKEN = process.env.BOT_TOKEN
 const SOUNDCLOUD_OAUTH_TOKEN =
@@ -19,12 +20,23 @@ const YT_DLP_BINARY_PATH = process.env.YT_DLP_BINARY_PATH
 const BINARY_CACHE_DIR = path.join(__dirname, '..', 'bin')
 const DATA_DIR = path.join(__dirname, '..', 'data')
 const AUTH_STORE_PATH = path.join(DATA_DIR, 'authorized-users.json')
+const DOWNLOAD_COUNT_PATH = path.join(DATA_DIR, 'download-count.json')
 const YT_DLP_RELEASE_BASE =
   process.env.YT_DLP_DOWNLOAD_BASE ||
   'https://github.com/yt-dlp/yt-dlp/releases/latest/download/'
 const MAX_CONCURRENT_DOWNLOADS = Number(process.env.MAX_CONCURRENT_DOWNLOADS || 3)
 const TELEGRAM_MAX_FILE_BYTES = 50 * 1024 * 1024
 const downloadQueue = createTaskQueue(MAX_CONCURRENT_DOWNLOADS)
+const IDHS_API_BASE_URL = process.env.IDHS_API_BASE_URL || 'http://localhost:3000'
+const IDHS_REQUEST_TIMEOUT_MS = Number(process.env.IDHS_REQUEST_TIMEOUT_MS || 15000)
+const IDHS_SUPPORTED_HOSTS = [
+  /spotify\.com/i,
+  /music\.apple\.com/i,
+  /deezer\.com/i,
+  /tidal\.com/i,
+  /youtube\.com/i,
+  /youtu\.be/i
+]
 
 const THUMB_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp'])
 const INFO_SUFFIX = '.info.json'
@@ -52,6 +64,8 @@ const bot = new Bot(BOT_TOKEN)
 const authorizedUsers = new Set()
 const awaitingPassword = new Set()
 let persistAuthorizedUsersTimer
+let persistDownloadCountTimer
+let downloadCount = 0
 const SOUND_CLOUD_REGEX = /(https?:\/\/(?:[\w-]+\.)?soundcloud\.com\/[\w\-./?=&%+#]+)/i
 
 bot.api
@@ -76,6 +90,11 @@ bot.command('start', async ctx => {
   }
 })
 
+bot.command('downloads', async ctx => {
+  const plural = downloadCount === 1 ? '' : 's'
+  await ctx.reply(`j'ai déjà DL ${downloadCount} track${plural}.`)
+})
+
 bot.on('message:text', async ctx => {
   if (isBotCommand(ctx)) {
     return
@@ -92,7 +111,21 @@ bot.on('message:text', async ctx => {
     return
   }
 
-  const url = extractSoundCloudUrl(ctx.message.text)
+  const messageText = ctx.message.text || ''
+  let url = extractSoundCloudUrl(messageText)
+
+  if (!url) {
+    const candidate = extractFirstUrl(messageText)
+    if (candidate && isIdhsSupportedLink(candidate)) {
+      await ctx.reply('jcherche ton lien chez les autres apps, attends bb')
+      url = await resolveLinkViaIdhs(candidate)
+      if (!url) {
+        await ctx.reply("je trouve pas ce track sur soundcloud :(")
+        return
+      }
+    }
+  }
+
   if (!url) {
     await ctx.reply('Balance un lien soundcloud valide bb')
     return
@@ -124,10 +157,138 @@ function extractSoundCloudUrl(text) {
   return match[1].replace(/[\]\)>,\s]+$/, '')
 }
 
+function extractFirstUrl(text) {
+  if (!text) return null
+  const match = text.match(/https?:\/\/[^\s]+/i)
+  if (!match) return null
+  return match[0].replace(/[\]\)>,\s]+$/, '')
+}
+
+
+function isIdhsSupportedLink(rawUrl) {
+  try {
+    const { hostname } = new URL(rawUrl)
+    return IDHS_SUPPORTED_HOSTS.some(pattern => pattern.test(hostname))
+  } catch {
+    return false
+  }
+}
+
+async function resolveLinkViaIdhs(originalLink) {
+  if (!IDHS_API_BASE_URL) return null
+  let endpoint
+  try {
+    endpoint = new URL('/api/search?v=1', IDHS_API_BASE_URL)
+  } catch (error) {
+    console.error('Invalid IDHS base URL:', error)
+    return null
+  }
+
+  const body = JSON.stringify({ link: originalLink, adapters: ['soundCloud'] })
+
+  try {
+    const response = await httpJsonRequest(endpoint, body, IDHS_REQUEST_TIMEOUT_MS)
+    if (response.status < 200 || response.status >= 300) {
+      console.warn(`IDHS request failed with status ${response.status}: ${response.body}`)
+      return null
+    }
+
+    let parsed
+    try {
+      parsed = JSON.parse(response.body)
+    } catch (error) {
+      console.warn('Unable to parse IDHS response as JSON:', error)
+      return null
+    }
+
+    if (parsed?.error) {
+      console.warn('IDHS responded with an error:', parsed.error)
+      return null
+    }
+
+    const soundCloudLink = pickSoundCloudLink(parsed)
+    return soundCloudLink
+  } catch (error) {
+    console.error('Failed to resolve link via IDHS:', error)
+    return null
+  }
+}
+
+function pickSoundCloudLink(result) {
+  const fromLinks = Array.isArray(result?.links) ? result.links : null
+  if (fromLinks) {
+    const entry = fromLinks.find(link => isUsableSoundCloudEntry(link))
+    if (entry?.url) {
+      return entry.url
+    }
+  }
+
+  if (Array.isArray(result)) {
+    const entry = result.find(item => typeof item === 'string' && SOUND_CLOUD_REGEX.test(item))
+    if (entry) return extractSoundCloudUrl(entry)
+  }
+
+  if (typeof result?.source === 'string' && SOUND_CLOUD_REGEX.test(result.source)) {
+    return extractSoundCloudUrl(result.source)
+  }
+
+  return null
+}
+
+function isUsableSoundCloudEntry(entry) {
+  if (!entry || typeof entry !== 'object') return false
+  if (entry.notAvailable) return false
+  if (typeof entry.url !== 'string') return false
+  const type = typeof entry.type === 'string' ? entry.type.toLowerCase() : ''
+  return type === 'soundcloud'
+}
+
+function httpJsonRequest(targetUrl, body, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const isHttps = targetUrl.protocol === 'https:'
+    const transport = isHttps ? https : http
+    const options = {
+      protocol: targetUrl.protocol,
+      hostname: targetUrl.hostname,
+      port: targetUrl.port || (isHttps ? 443 : 80),
+      path: `${targetUrl.pathname}${targetUrl.search}`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        Accept: 'application/json'
+      }
+    }
+
+    const req = transport.request(options, res => {
+      const chunks = []
+      res.on('data', chunk => chunks.push(chunk))
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode || 0,
+          body: Buffer.concat(chunks).toString('utf8')
+        })
+      })
+    })
+
+    req.on('error', reject)
+
+    if (timeoutMs) {
+      req.setTimeout(timeoutMs, () => {
+        req.destroy(new Error('IDHS request timed out'))
+      })
+    }
+
+    req.write(body)
+    req.end()
+  })
+}
+
 async function handleDownloadJob(ctx, url) {
   let download
   try {
     download = await downloadTrack(url)
+    incrementDownloadCount()
     const stats = await fsp.stat(download.path)
     if (stats.size > TELEGRAM_MAX_FILE_BYTES) {
       const sizeMb = (stats.size / (1024 * 1024)).toFixed(2)
@@ -351,7 +512,9 @@ async function pickAudioFile(tmpDir, files) {
 
 async function initializeBot() {
   await loadAuthorizedUsersFromDisk()
+  await loadDownloadCountFromDisk()
   console.log(`Authorized users loaded: ${authorizedUsers.size}`)
+  console.log(`Tracks downloaded historically: ${downloadCount}`)
   console.log('Bot is up. Waiting for SoundCloud URLs...')
   await bot.start()
 }
@@ -375,6 +538,27 @@ async function loadAuthorizedUsersFromDisk() {
   }
 }
 
+async function loadDownloadCountFromDisk() {
+  try {
+    const raw = await fsp.readFile(DOWNLOAD_COUNT_PATH, 'utf8')
+    const parsed = JSON.parse(raw)
+    let value
+    if (typeof parsed === 'number') {
+      value = parsed
+    } else if (parsed && typeof parsed.count === 'number') {
+      value = parsed.count
+    }
+
+    if (Number.isFinite(value)) {
+      downloadCount = value
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn('Unable to load download count file:', error)
+    }
+  }
+}
+
 function scheduleAuthorizedPersist() {
   if (persistAuthorizedUsersTimer) return
   persistAuthorizedUsersTimer = setTimeout(() => {
@@ -391,6 +575,28 @@ async function persistAuthorizedUsers() {
   const tempPath = `${AUTH_STORE_PATH}.tmp-${Date.now()}`
   await fsp.writeFile(tempPath, payload, 'utf8')
   await fsp.rename(tempPath, AUTH_STORE_PATH)
+}
+
+function scheduleDownloadCountPersist() {
+  if (persistDownloadCountTimer) return
+  persistDownloadCountTimer = setTimeout(() => {
+    persistDownloadCountTimer = null
+    persistDownloadCount().catch(error =>
+      console.error('Failed to persist download count:', error)
+    )
+  }, 250)
+}
+
+async function persistDownloadCount() {
+  await fsp.mkdir(DATA_DIR, { recursive: true })
+  const tempPath = `${DOWNLOAD_COUNT_PATH}.tmp-${Date.now()}`
+  await fsp.writeFile(tempPath, JSON.stringify(downloadCount), 'utf8')
+  await fsp.rename(tempPath, DOWNLOAD_COUNT_PATH)
+}
+
+function incrementDownloadCount() {
+  downloadCount += 1
+  scheduleDownloadCountPersist()
 }
 
 function createTaskQueue(desiredConcurrency) {
