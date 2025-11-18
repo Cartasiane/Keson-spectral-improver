@@ -355,7 +355,7 @@ function measureHighFreqEnergy(filePath, cutoffHz) {
       '-loglevel', 'info',
       '-nostats',
       '-i', filePath,
-      '-filter_complex', `highpass=f=${cutoffHz},astats=metadata=1:reset=1`,
+      '-filter_complex', `highpass=f=${cutoffHz},astats=metadata=1:reset=0:measure_overall=1`,
       '-f', 'null',
       '-'
     ]
