@@ -40,7 +40,7 @@ const IDHS_SUPPORTED_HOSTS = [
   /youtube\.com/i,
   /youtu\.be/i
 ]
-const ENABLE_QUALITY_ANALYSIS = process.env.ENABLE_QUALITY_ANALYSIS === 'true'
+const ENABLE_QUALITY_ANALYSIS = process.env.ENABLE_QUALITY_ANALYSIS !== 'false'
 const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg'
 const QUALITY_RMS_THRESHOLD_DB = Number(process.env.QUALITY_RMS_THRESHOLD_DB || -55)
 const QUALITY_FREQ_STEPS = [
