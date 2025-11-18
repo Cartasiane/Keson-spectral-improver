@@ -306,6 +306,7 @@ function httpJsonRequest(targetUrl, body, timeoutMs) {
 async function analyzeTrackQuality(filePath) {
   if (!FFMPEG_PATH) return null
   let selected = null
+  let hadMeasurement = false
   qualityDebug('Starting quality probe for:', filePath)
   qualityDebug('Using frequency steps:', QUALITY_FREQ_STEPS)
 
@@ -313,9 +314,10 @@ async function analyzeTrackQuality(filePath) {
     qualityDebug(`Measuring RMS above ${step.freq} Hz`)
     const rms = await measureHighFreqEnergy(filePath, step.freq)
     if (rms === null) {
-      qualityDebug(`Measurement failed for ${step.freq} Hz; aborting.`)
-      return null
+      qualityDebug(`Measurement failed for ${step.freq} Hz; trying next tier.`)
+      continue
     }
+    hadMeasurement = true
     qualityDebug(`RMS for ${step.freq} Hz: ${rms} dB`)
     if (rms > QUALITY_RMS_THRESHOLD_DB) {
       const label = messages.qualityLabel(step.labelKey)
@@ -330,6 +332,10 @@ async function analyzeTrackQuality(filePath) {
   }
 
   if (!selected) {
+    if (!hadMeasurement) {
+      qualityDebug('All measurements failed; returning null to skip caption update.')
+      return null
+    }
     qualityDebug('No tier matched; using fallback label.')
     return {
       cutoffHz: 0,
@@ -374,18 +380,35 @@ function measureHighFreqEnergy(filePath, cutoffHz) {
         resolve(null)
         return
       }
-      const matches = [...stderr.matchAll(/Overall\.RMS_level:\s*(-?\d+(?:\.\d+)?)/g)]
-      if (!matches.length) {
+      const rms = extractRmsFromAstStats(stderr)
+      if (rms === null) {
         qualityDebug('No RMS matches in ffmpeg stderr output; raw stderr follows:')
         qualityDebug(stderr.slice(-2000))
         resolve(null)
         return
       }
-      const rms = Number(matches[matches.length - 1][1])
       qualityDebug('Parsed RMS value:', rms)
-      resolve(Number.isFinite(rms) ? rms : null)
+      resolve(rms)
     })
   })
+}
+
+function extractRmsFromAstStats(output) {
+  const regexes = [
+    /Overall\.RMS_level:\s*(-?\d+(?:\.\d+)?)/i,
+    /RMS level dB:\s*(-?\d+(?:\.\d+)?)/i,
+    /RMS_level dB:\s*(-?\d+(?:\.\d+)?)/i
+  ]
+
+  for (const pattern of regexes) {
+    const match = pattern.exec(output)
+    if (match) {
+      const value = Number(match[1])
+      return Number.isFinite(value) ? value : null
+    }
+  }
+
+  return null
 }
 
 async function handleDownloadJob(ctx, url) {
