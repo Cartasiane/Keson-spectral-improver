@@ -50,6 +50,9 @@ module.exports = {
   genericError() {
     return 'dsl je trouve pas ton bail, check ton lien.'
   },
+  queueFull() {
+    return 'trop de demandes rn, reviens dans une minute bb'
+  },
   captionDefault() {
     return 'Enjoy bb!'
   },

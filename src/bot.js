@@ -26,9 +26,10 @@ const DOWNLOAD_COUNT_PATH = path.join(DATA_DIR, 'download-count.json')
 const YT_DLP_RELEASE_BASE =
   process.env.YT_DLP_DOWNLOAD_BASE ||
   'https://github.com/yt-dlp/yt-dlp/releases/latest/download/'
-const MAX_CONCURRENT_DOWNLOADS = Number(process.env.MAX_CONCURRENT_DOWNLOADS || 3)
+const MAX_CONCURRENT_DOWNLOADS = readPositiveInt(process.env.MAX_CONCURRENT_DOWNLOADS, 3)
+const MAX_PENDING_DOWNLOADS = readPositiveInt(process.env.MAX_PENDING_DOWNLOADS, 25)
 const TELEGRAM_MAX_FILE_BYTES = 50 * 1024 * 1024
-const downloadQueue = createTaskQueue(MAX_CONCURRENT_DOWNLOADS)
+const downloadQueue = createTaskQueue(MAX_CONCURRENT_DOWNLOADS, MAX_PENDING_DOWNLOADS)
 const IDHS_API_BASE_URL = process.env.IDHS_API_BASE_URL || 'http://localhost:3000'
 const IDHS_REQUEST_TIMEOUT_MS = Number(process.env.IDHS_REQUEST_TIMEOUT_MS || 15000)
 const IDHS_SUPPORTED_HOSTS = [
@@ -39,7 +40,7 @@ const IDHS_SUPPORTED_HOSTS = [
   /youtube\.com/i,
   /youtu\.be/i
 ]
-const ENABLE_QUALITY_ANALYSIS = process.env.ENABLE_QUALITY_ANALYSIS !== 'false'
+const ENABLE_QUALITY_ANALYSIS = process.env.ENABLE_QUALITY_ANALYSIS === 'true'
 const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg'
 const QUALITY_RMS_THRESHOLD_DB = Number(process.env.QUALITY_RMS_THRESHOLD_DB || -55)
 const QUALITY_FREQ_STEPS = [
@@ -50,6 +51,8 @@ const QUALITY_FREQ_STEPS = [
   { freq: 15500, labelKey: 'kbps128', rating: 'basse' }
 ]
 const QUALITY_FALLBACK_LABEL = messages.qualityFallbackLabel()
+const YT_DLP_SKIP_CERT_CHECK = process.env.YT_DLP_SKIP_CERT_CHECK === 'true'
+const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM']
 
 const THUMB_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp'])
 const INFO_SUFFIX = '.info.json'
@@ -79,7 +82,12 @@ const awaitingPassword = new Set()
 let persistAuthorizedUsersTimer
 let persistDownloadCountTimer
 let downloadCount = 0
+let authorizedUsersDirty = false
+let downloadCountDirty = false
+let isShuttingDown = false
 const SOUND_CLOUD_REGEX = /(https?:\/\/(?:[\w-]+\.)?soundcloud\.com\/[\w\-./?=&%+#]+)/i
+
+setupSignalHandlers()
 
 bot.api
   .setMyCommands([{ command: 'start', description: 'Show bot instructions' }])
@@ -370,10 +378,8 @@ async function handleDownloadJob(ctx, url) {
   let download
   try {
     download = await downloadTrack(url)
-    incrementDownloadCount()
     const stats = await fsp.stat(download.path)
     if (stats.size > TELEGRAM_MAX_FILE_BYTES) {
-      const sizeMb = (stats.size / (1024 * 1024)).toFixed(2)
       await ctx.reply(messages.fileTooLarge())
       return
     }
@@ -391,6 +397,7 @@ async function handleDownloadJob(ctx, url) {
     await ctx.replyWithDocument(inputFile, {
       caption: buildCaption(download.metadata, qualityInfo)
     })
+    incrementDownloadCount()
   } finally {
     if (download) {
       await cleanupTempDir(download.tempDir)
@@ -403,31 +410,43 @@ async function downloadTrack(url) {
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sc-dl-'))
   const outputTemplate = path.join(tmpDir, '%(title)s.%(ext)s')
   const headers = [`Authorization: OAuth ${SOUNDCLOUD_OAUTH_TOKEN}`]
+  let completed = false
+  try {
+    const options = {
+      output: outputTemplate,
+      format: 'bestaudio[ext!=opus][acodec!=opus]/http_aac_1_0/bestaudio/best',
+      addHeader: headers,
+      noPlaylist: true,
+      retries: 3,
+      noPart: true,
+      quiet: true,
+      addMetadata: true,
+      embedThumbnail: true,
+      convertThumbnails: 'jpg',
+      writeInfoJson: true
+    }
 
-  await ytdlp(url, {
-    output: outputTemplate,
-    format: 'bestaudio[ext!=opus][acodec!=opus]/http_aac_1_0/bestaudio/best',
-    addHeader: headers,
-    noPlaylist: true,
-    noCheckCertificates: true,
-    retries: 3,
-    noPart: true,
-    quiet: true,
-    addMetadata: true,
-    embedThumbnail: true,
-    convertThumbnails: 'jpg',
-    writeInfoJson: true
-  })
+    if (YT_DLP_SKIP_CERT_CHECK) {
+      options.noCheckCertificates = true
+    }
 
-  const files = await fsp.readdir(tmpDir)
-  if (!files.length) {
-    const err = new Error('SoundCloud returned no downloadable audio for this link.')
-    err.userMessage = messages.missingAudioFile()
-    throw err
+    await ytdlp(url, options)
+
+    const files = await fsp.readdir(tmpDir)
+    if (!files.length) {
+      const err = new Error('SoundCloud returned no downloadable audio for this link.')
+      err.userMessage = messages.missingAudioFile()
+      throw err
+    }
+
+    const { audioFile, metadata } = await pickAudioFile(tmpDir, files)
+    completed = true
+    return { tempDir: tmpDir, path: audioFile.path, filename: audioFile.name, metadata }
+  } finally {
+    if (!completed) {
+      await cleanupTempDir(tmpDir)
+    }
   }
-
-  const { audioFile, metadata } = await pickAudioFile(tmpDir, files)
-  return { tempDir: tmpDir, path: audioFile.path, filename: audioFile.name, metadata }
 }
 
 async function cleanupTempDir(dir) {
@@ -655,6 +674,7 @@ async function loadDownloadCountFromDisk() {
 }
 
 function scheduleAuthorizedPersist() {
+  authorizedUsersDirty = true
   if (persistAuthorizedUsersTimer) return
   persistAuthorizedUsersTimer = setTimeout(() => {
     persistAuthorizedUsersTimer = null
@@ -670,9 +690,11 @@ async function persistAuthorizedUsers() {
   const tempPath = `${AUTH_STORE_PATH}.tmp-${Date.now()}`
   await fsp.writeFile(tempPath, payload, 'utf8')
   await fsp.rename(tempPath, AUTH_STORE_PATH)
+  authorizedUsersDirty = false
 }
 
 function scheduleDownloadCountPersist() {
+  downloadCountDirty = true
   if (persistDownloadCountTimer) return
   persistDownloadCountTimer = setTimeout(() => {
     persistDownloadCountTimer = null
@@ -687,6 +709,7 @@ async function persistDownloadCount() {
   const tempPath = `${DOWNLOAD_COUNT_PATH}.tmp-${Date.now()}`
   await fsp.writeFile(tempPath, JSON.stringify(downloadCount), 'utf8')
   await fsp.rename(tempPath, DOWNLOAD_COUNT_PATH)
+  downloadCountDirty = false
 }
 
 function incrementDownloadCount() {
@@ -694,9 +717,12 @@ function incrementDownloadCount() {
   scheduleDownloadCountPersist()
 }
 
-function createTaskQueue(desiredConcurrency) {
+function createTaskQueue(desiredConcurrency, maxQueueSize = Infinity) {
   const limit = Number.isFinite(desiredConcurrency) && desiredConcurrency > 0
     ? desiredConcurrency
+    : Infinity
+  const queueLimit = Number.isFinite(maxQueueSize) && maxQueueSize >= 0
+    ? maxQueueSize
     : Infinity
   let active = 0
   const queue = []
@@ -723,6 +749,12 @@ function createTaskQueue(desiredConcurrency) {
 
   return {
     add(task) {
+      if (queue.length >= queueLimit) {
+        const error = new Error('Download queue is full.')
+        error.userMessage = messages.queueFull()
+        return Promise.reject(error)
+      }
+
       return new Promise((resolve, reject) => {
         queue.push({ task, resolve, reject })
         runNext()
@@ -812,4 +844,81 @@ function pickUserFriendlyLine(text) {
 function truncate(text, max = 140) {
   if (text.length <= max) return text
   return `${text.slice(0, max - 1)}…`
+}
+
+function setupSignalHandlers() {
+  SHUTDOWN_SIGNALS.forEach(signal => {
+    process.once(signal, () => {
+      if (isShuttingDown) return
+      isShuttingDown = true
+      console.log(`Received ${signal}. Stopping bot...`)
+      shutdownGracefully(signal)
+        .catch(error => {
+          console.error('Shutdown failed:', error)
+          process.exitCode = 1
+        })
+        .finally(() => {
+          process.exit(process.exitCode || 0)
+        })
+    })
+  })
+
+  process.on('beforeExit', () => {
+    flushState().catch(error => {
+      console.error('Failed to flush state before exit:', error)
+    })
+  })
+}
+
+async function shutdownGracefully(signal) {
+  try {
+    await bot.stop()
+  } catch (error) {
+    console.warn(`Unable to stop bot cleanly after ${signal}:`, error)
+  }
+
+  await flushState()
+}
+
+async function flushState() {
+  if (persistAuthorizedUsersTimer) {
+    clearTimeout(persistAuthorizedUsersTimer)
+    persistAuthorizedUsersTimer = null
+  }
+  if (persistDownloadCountTimer) {
+    clearTimeout(persistDownloadCountTimer)
+    persistDownloadCountTimer = null
+  }
+
+  const pending = []
+  if (authorizedUsersDirty) {
+    pending.push(
+      persistAuthorizedUsers().catch(error => {
+        console.error('Failed to persist authorized users during shutdown:', error)
+        throw error
+      })
+    )
+  }
+  if (downloadCountDirty) {
+    pending.push(
+      persistDownloadCount().catch(error => {
+        console.error('Failed to persist download count during shutdown:', error)
+        throw error
+      })
+    )
+  }
+
+  if (!pending.length) {
+    return
+  }
+
+  await Promise.all(pending)
+}
+
+function readPositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10)
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed
+  }
+  return fallback
 }

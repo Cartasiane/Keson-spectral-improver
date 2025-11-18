@@ -22,6 +22,9 @@ Telegram bot built with [grammY](https://grammy.dev/) that accepts a SoundCloud 
    - `BOT_PASSWORD`: Shared password that users must reply with when the bot prompts them to unlock downloads.
    - *(optional)* `YT_DLP_BINARY_PATH`: Absolute path to a pre-installed `yt-dlp` binary if you do not want the app to download one automatically.
    - *(optional)* `MAX_CONCURRENT_DOWNLOADS`: Limit how many yt-dlp jobs can run at once (default: `3`).
+   - *(optional)* `MAX_PENDING_DOWNLOADS`: Maximum queued download jobs waiting for a worker before new requests are rejected (default: `25`).
+   - *(optional)* `ENABLE_QUALITY_ANALYSIS`: Set to `true` to run FFmpeg-based high-frequency probes on every download. Disabled by default because it is CPU-heavy.
+   - *(optional)* `YT_DLP_SKIP_CERT_CHECK`: Set to `true` only if you must temporarily bypass TLS certificate validation for `yt-dlp` (e.g., corporate MITM proxy). Defaults to `false` for safety.
 
 ## Run the bot
 ```bash
@@ -39,4 +42,6 @@ The bot runs in long-polling mode and logs startup info to the console.
 - The first time the bot runs it automatically downloads the appropriate stand-alone `yt-dlp` binary for your OS/architecture and caches it in `bin/`. If you prefer to ship your own executable, set `YT_DLP_BINARY_PATH` to point to it.
 - Authorized user IDs are persisted to `data/authorized-users.json`, so unlocking survives restarts. Delete the file if you need to revoke all users quickly.
 - Concurrency is capped by `MAX_CONCURRENT_DOWNLOADS`; bump it up (e.g., `5`) only if your host has the bandwidth/CPU for multiple yt-dlp processes.
+- Requests beyond `MAX_PENDING_DOWNLOADS` are rejected immediately with a friendly "queue is full" response so the bot cannot be overwhelmed while long transfers are active.
+- Spectral quality hints require FFmpeg and significant CPU time. Leave `ENABLE_QUALITY_ANALYSIS` unset unless you really need the metadata.
 - FFmpeg is required for embedding album art/metadata. If it’s missing, yt-dlp falls back to plain downloads and the bot will log warnings; install it via `brew install ffmpeg`, `apt install ffmpeg`, etc.
