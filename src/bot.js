@@ -43,13 +43,13 @@ const IDHS_SUPPORTED_HOSTS = [
 const ENABLE_QUALITY_ANALYSIS = process.env.ENABLE_QUALITY_ANALYSIS !== 'false'
 const QUALITY_ANALYSIS_DEBUG = process.env.QUALITY_ANALYSIS_DEBUG === 'true'
 const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg'
-const QUALITY_RMS_THRESHOLD_DB = Number(process.env.QUALITY_RMS_THRESHOLD_DB || -55)
+const QUALITY_MAX_DELTA_DB = Number(process.env.QUALITY_MAX_DELTA_DB || 20)
 const QUALITY_FREQ_STEPS = [
-  { freq: 19500, labelKey: 'lossless', rating: 'haute' },
-  { freq: 18500, labelKey: 'kbps224', rating: 'haute' },
-  { freq: 17500, labelKey: 'kbps192', rating: 'moyenne' },
-  { freq: 16500, labelKey: 'kbps160', rating: 'moyenne-basse' },
-  { freq: 15500, labelKey: 'kbps128', rating: 'basse' }
+  { freq: 19500, labelKey: 'lossless', rating: 'haute', maxDeltaDb: QUALITY_MAX_DELTA_DB },
+  { freq: 18500, labelKey: 'kbps224', rating: 'haute', maxDeltaDb: QUALITY_MAX_DELTA_DB + 5 },
+  { freq: 17500, labelKey: 'kbps192', rating: 'moyenne', maxDeltaDb: QUALITY_MAX_DELTA_DB + 10 },
+  { freq: 16500, labelKey: 'kbps160', rating: 'moyenne-basse', maxDeltaDb: QUALITY_MAX_DELTA_DB + 14 },
+  { freq: 15500, labelKey: 'kbps128', rating: 'basse', maxDeltaDb: QUALITY_MAX_DELTA_DB + 18 }
 ]
 const QUALITY_FALLBACK_LABEL = messages.qualityFallbackLabel()
 const YT_DLP_SKIP_CERT_CHECK = process.env.YT_DLP_SKIP_CERT_CHECK === 'true'
@@ -307,6 +307,12 @@ async function analyzeTrackQuality(filePath) {
   if (!FFMPEG_PATH) return null
   let selected = null
   let hadMeasurement = false
+  const overallRmsDb = await measureOverallRms(filePath)
+  if (!Number.isFinite(overallRmsDb)) {
+    qualityDebug('Unable to compute overall RMS; aborting quality analysis')
+    return null
+  }
+  qualityDebug('Overall RMS level:', overallRmsDb)
   qualityDebug('Starting quality probe for:', filePath)
   qualityDebug('Using frequency steps:', QUALITY_FREQ_STEPS)
 
@@ -319,7 +325,9 @@ async function analyzeTrackQuality(filePath) {
     }
     hadMeasurement = true
     qualityDebug(`RMS for ${step.freq} Hz: ${rms} dB`)
-    if (rms > QUALITY_RMS_THRESHOLD_DB) {
+    const delta = overallRmsDb - rms
+    qualityDebug(`Delta vs fullband: ${delta.toFixed(2)} dB (threshold ${step.maxDeltaDb} dB)`) 
+    if (delta <= step.maxDeltaDb) {
       const label = messages.qualityLabel(step.labelKey)
       selected = {
         cutoffHz: step.freq,
@@ -388,6 +396,49 @@ function measureHighFreqEnergy(filePath, cutoffHz) {
         return
       }
       qualityDebug('Parsed RMS value:', rms)
+      resolve(rms)
+    })
+  })
+}
+
+async function measureOverallRms(filePath) {
+  return new Promise(resolve => {
+    qualityDebug('Measuring full-band RMS for', filePath)
+    const args = [
+      '-hide_banner',
+      '-loglevel', 'info',
+      '-nostats',
+      '-i', filePath,
+      '-filter_complex', 'astats=metadata=1:reset=0:measure_overall=1',
+      '-f', 'null',
+      '-'
+    ]
+
+    const child = spawn(FFMPEG_PATH, args)
+    let stderr = ''
+
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString()
+    })
+
+    child.on('error', error => {
+      console.warn('Unable to start ffmpeg for overall RMS probe:', error)
+      qualityDebug('Full-band ffmpeg spawn error:', error)
+      resolve(null)
+    })
+
+    child.on('close', code => {
+      if (code !== 0) {
+        console.warn(`ffmpeg overall RMS probe failed (code ${code})`)
+        qualityDebug(`Full-band ffmpeg exited with code ${code}`)
+        resolve(null)
+        return
+      }
+      const rms = extractRmsFromAstStats(stderr)
+      if (rms === null) {
+        qualityDebug('No RMS in overall probe output; raw stderr:')
+        qualityDebug(stderr.slice(-2000))
+      }
       resolve(rms)
     })
   })
