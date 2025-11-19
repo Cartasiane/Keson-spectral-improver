@@ -25,6 +25,7 @@ Telegram bot built with [grammY](https://grammy.dev/) that accepts a SoundCloud 
    - *(optional)* `MAX_PENDING_DOWNLOADS`: Maximum queued download jobs waiting for a worker before new requests are rejected (default: `25`).
    - *(optional)* `ENABLE_QUALITY_ANALYSIS`: Set to `false` to disable the FFmpeg-based high-frequency probe that annotates downloads with quality hints (enabled by default).
    - *(optional)* `QUALITY_MAX_DELTA_DB`: Controls how strict the "lossless" classification is by capping the allowed dB drop between the full-band RMS and the high-frequency RMS (default: `20`). Lower values = stricter.
+   - *(optional)* `QUALITY_DROP_THRESHOLD_DB`: Minimum dB drop between consecutive bands that forces the classifier to stop considering higher tiers (default: `15`). Increase it if genuine masters are being downgraded; decrease it to be harsher.
    - *(optional)* `QUALITY_ANALYSIS_DEBUG`: Set to `true` to emit verbose console logs for every spectral probe (useful when the caption is missing quality info).
    - *(optional)* `YT_DLP_SKIP_CERT_CHECK`: Set to `true` only if you must temporarily bypass TLS certificate validation for `yt-dlp` (e.g., corporate MITM proxy). Defaults to `false` for safety.
 

@@ -44,12 +44,13 @@ const ENABLE_QUALITY_ANALYSIS = process.env.ENABLE_QUALITY_ANALYSIS !== 'false'
 const QUALITY_ANALYSIS_DEBUG = process.env.QUALITY_ANALYSIS_DEBUG === 'true'
 const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg'
 const QUALITY_MAX_DELTA_DB = Number(process.env.QUALITY_MAX_DELTA_DB || 20)
+const QUALITY_DROP_THRESHOLD_DB = Number(process.env.QUALITY_DROP_THRESHOLD_DB || 15)
 const QUALITY_FREQ_STEPS = [
-  { freq: 19500, labelKey: 'lossless', rating: 'haute', maxDeltaDb: QUALITY_MAX_DELTA_DB },
-  { freq: 18500, labelKey: 'kbps224', rating: 'haute', maxDeltaDb: QUALITY_MAX_DELTA_DB + 5 },
-  { freq: 17500, labelKey: 'kbps192', rating: 'moyenne', maxDeltaDb: QUALITY_MAX_DELTA_DB + 10 },
+  { freq: 15500, labelKey: 'kbps128', rating: 'basse', maxDeltaDb: QUALITY_MAX_DELTA_DB + 18 },
   { freq: 16500, labelKey: 'kbps160', rating: 'moyenne-basse', maxDeltaDb: QUALITY_MAX_DELTA_DB + 14 },
-  { freq: 15500, labelKey: 'kbps128', rating: 'basse', maxDeltaDb: QUALITY_MAX_DELTA_DB + 18 }
+  { freq: 17500, labelKey: 'kbps192', rating: 'moyenne', maxDeltaDb: QUALITY_MAX_DELTA_DB + 10 },
+  { freq: 18500, labelKey: 'kbps224', rating: 'haute', maxDeltaDb: QUALITY_MAX_DELTA_DB + 5 },
+  { freq: 19500, labelKey: 'lossless', rating: 'haute', maxDeltaDb: QUALITY_MAX_DELTA_DB }
 ]
 const QUALITY_FALLBACK_LABEL = messages.qualityFallbackLabel()
 const YT_DLP_SKIP_CERT_CHECK = process.env.YT_DLP_SKIP_CERT_CHECK === 'true'
@@ -314,7 +315,10 @@ async function analyzeTrackQuality(filePath) {
   }
   qualityDebug('Overall RMS level:', overallRmsDb)
   qualityDebug('Starting quality probe for:', filePath)
-  qualityDebug('Using frequency steps:', QUALITY_FREQ_STEPS)
+  qualityDebug('Using frequency steps (ascending):', QUALITY_FREQ_STEPS)
+
+  const measurements = []
+  let prevRms = null
 
   for (const step of QUALITY_FREQ_STEPS) {
     qualityDebug(`Measuring RMS above ${step.freq} Hz`)
@@ -326,33 +330,55 @@ async function analyzeTrackQuality(filePath) {
     hadMeasurement = true
     qualityDebug(`RMS for ${step.freq} Hz: ${rms} dB`)
     const delta = overallRmsDb - rms
-    qualityDebug(`Delta vs fullband: ${delta.toFixed(2)} dB (threshold ${step.maxDeltaDb} dB)`) 
-    if (delta <= step.maxDeltaDb) {
-      const label = messages.qualityLabel(step.labelKey)
+    const dropFromPrev = prevRms === null ? null : prevRms - rms
+    qualityDebug(
+      `Delta vs fullband: ${delta.toFixed(2)} dB (threshold ${step.maxDeltaDb} dB); drop from prev: ${dropFromPrev === null ? 'n/a' : dropFromPrev.toFixed(2) + ' dB'}`
+    )
+    measurements.push({ step, rms, delta, dropFromPrev })
+    prevRms = rms
+  }
+
+  if (!hadMeasurement || measurements.length === 0) {
+    qualityDebug('All measurements failed; returning null to skip caption update.')
+    return null
+  }
+
+  const dropIndex = measurements.findIndex(entry =>
+    entry.dropFromPrev !== null && entry.dropFromPrev >= QUALITY_DROP_THRESHOLD_DB
+  )
+
+  let maxAllowedIndex = measurements.length - 1
+  if (dropIndex > 0) {
+    maxAllowedIndex = dropIndex - 1
+    qualityDebug(
+      `Detected spectral drop of ${measurements[dropIndex].dropFromPrev?.toFixed(2)} dB at ${measurements[dropIndex].step.freq} Hz; limiting classification to <= ${measurements[maxAllowedIndex].step.freq} Hz`
+    )
+  }
+
+  for (let i = maxAllowedIndex; i >= 0; i--) {
+    const measurement = measurements[i]
+    if (measurement.delta <= measurement.step.maxDeltaDb) {
+      const label = messages.qualityLabel(measurement.step.labelKey)
       selected = {
-        cutoffHz: step.freq,
-        rating: step.rating,
-        text: `~${(step.freq / 1000).toFixed(1)} kHz (${label})`
+        cutoffHz: measurement.step.freq,
+        rating: measurement.step.rating,
+        text: `~${(measurement.step.freq / 1000).toFixed(1)} kHz (${label})`
       }
       qualityDebug('Selected tier:', selected)
       break
     }
   }
 
-  if (!selected) {
-    if (!hadMeasurement) {
-      qualityDebug('All measurements failed; returning null to skip caption update.')
-      return null
-    }
-    qualityDebug('No tier matched; using fallback label.')
-    return {
-      cutoffHz: 0,
-      rating: 'très basse',
-      text: QUALITY_FALLBACK_LABEL
-    }
+  if (selected) {
+    return selected
   }
 
-  return selected
+  qualityDebug('No tier matched thresholds; using fallback label.')
+  return {
+    cutoffHz: 0,
+    rating: 'très basse',
+    text: QUALITY_FALLBACK_LABEL
+  }
 }
 
 function measureHighFreqEnergy(filePath, cutoffHz) {
