@@ -5,6 +5,8 @@ const QUALITY_VERDICTS = {
   likely_authentic: 'Authentique (probable)',
   maybe_authentic: 'Peut-être authentique',
   maybe_fake: 'Peut-être fake',
+  aac_256: 'Source AAC-256 (perte attendue)',
+  sub_aac_lossy: 'Source déjà dégradée (<256 kbps)',
   likely_fake: 'Probablement fake',
   fake: 'Fake',
   unknown: 'Analyse incertaine',

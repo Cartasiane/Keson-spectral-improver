@@ -842,6 +842,20 @@ function classifyVerdict(sampleRate, maxFreq) {
   if (maxFreq === null || !Number.isFinite(maxFreq)) {
     return { verdictKey: 'unknown', verdictLabel: "Can't determine" }
   }
+
+  // Detect typical AAC 256 kbps spectral roll-off so we don't flag expected lossy files as fake.
+  if (sampleRate <= 48000) {
+    const norm = maxFreq / nyquist
+    const aac256Lower = 0.78 // ~18 kHz on 44.1/48 kHz
+    const aac256Upper = 0.93 // ~21 kHz on 44.1/48 kHz
+    if (norm >= aac256Lower && norm <= aac256Upper) {
+      return { verdictKey: 'aac_256', verdictLabel: 'Probable AAC-256 source (expected lossy)' }
+    }
+    if (norm < aac256Lower) {
+      return { verdictKey: 'sub_aac_lossy', verdictLabel: 'Likely pre-AAC lossy source (<256 kbps)' }
+    }
+  }
+
   if (sampleRate === 48000) {
     if (maxFreq < 20000) return { verdictKey: 'fake', verdictLabel: 'Fake' }
     if (maxFreq < nyquist * 0.5) return { verdictKey: 'likely_fake', verdictLabel: 'Most likely Fake' }
