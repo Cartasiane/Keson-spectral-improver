@@ -1,5 +1,7 @@
 .env
 bin/
+!bin/whatsmybitrate
+!bin/whatsmybitrate-json
 data/
 node_modules/
 package-lock.json
