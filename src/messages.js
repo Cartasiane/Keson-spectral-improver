@@ -1,12 +1,14 @@
 'use strict'
 
-const QUALITY_LABELS = {
-  lossless: '≈lossless / ≥256 kbps',
-  kbps224: '≈224 kbps',
-  kbps192: '≈192 kbps',
-  kbps160: '≈160 kbps',
-  kbps128: '≈128 kbps',
-  fallback: '≤15 kHz coupure (≤96 kbps)'
+const QUALITY_VERDICTS = {
+  authentic: 'Authentique',
+  likely_authentic: 'Authentique (probable)',
+  maybe_authentic: 'Peut-être authentique',
+  maybe_fake: 'Peut-être fake',
+  likely_fake: 'Probablement fake',
+  fake: 'Fake',
+  unknown: 'Analyse incertaine',
+  fallback: 'Analyse spectrale indisponible'
 }
 
 module.exports = {
@@ -63,10 +65,10 @@ module.exports = {
     return `Qualité approx: ${text}`
   },
   qualityFallbackLabel() {
-    return QUALITY_LABELS.fallback
+    return QUALITY_VERDICTS.fallback
   },
-  qualityLabel(key) {
-    return QUALITY_LABELS[key] || key
+  qualityVerdict(key, fallbackLabel) {
+    return QUALITY_VERDICTS[key] || fallbackLabel || QUALITY_VERDICTS.unknown
   },
   opusOnlyMessage() {
     return 'Impossible de DL en opus bb, trouve une autre version.'

@@ -43,16 +43,7 @@ const IDHS_SUPPORTED_HOSTS = [
 const ENABLE_QUALITY_ANALYSIS = process.env.ENABLE_QUALITY_ANALYSIS !== 'false'
 const QUALITY_ANALYSIS_DEBUG = process.env.QUALITY_ANALYSIS_DEBUG === 'true'
 const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg'
-const QUALITY_MAX_DELTA_DB = Number(process.env.QUALITY_MAX_DELTA_DB || 20)
-const QUALITY_DROP_THRESHOLD_DB = Number(process.env.QUALITY_DROP_THRESHOLD_DB || 15)
-const QUALITY_FREQ_STEPS = [
-  { freq: 15500, labelKey: 'kbps128', rating: 'basse', maxDeltaDb: QUALITY_MAX_DELTA_DB + 18 },
-  { freq: 16500, labelKey: 'kbps160', rating: 'moyenne-basse', maxDeltaDb: QUALITY_MAX_DELTA_DB + 14 },
-  { freq: 17500, labelKey: 'kbps192', rating: 'moyenne', maxDeltaDb: QUALITY_MAX_DELTA_DB + 10 },
-  { freq: 18500, labelKey: 'kbps224', rating: 'haute', maxDeltaDb: QUALITY_MAX_DELTA_DB + 5 },
-  { freq: 19500, labelKey: 'lossless', rating: 'haute', maxDeltaDb: QUALITY_MAX_DELTA_DB }
-]
-const QUALITY_FALLBACK_LABEL = messages.qualityFallbackLabel()
+const FFPROBE_PATH = process.env.FFPROBE_PATH || 'ffprobe'
 const YT_DLP_SKIP_CERT_CHECK = process.env.YT_DLP_SKIP_CERT_CHECK === 'true'
 const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM']
 
@@ -304,188 +295,680 @@ function httpJsonRequest(targetUrl, body, timeoutMs) {
   })
 }
 
+class TooShortError extends Error {
+  constructor(message = 'Audio is too short for analysis') {
+    super(message)
+    this.name = 'TooShortError'
+  }
+}
+
+class SilentTrackError extends Error {
+  constructor(message = 'Audio appears to be silent') {
+    super(message)
+    this.name = 'SilentTrackError'
+  }
+}
+
 async function analyzeTrackQuality(filePath) {
-  if (!FFMPEG_PATH) return null
-  let selected = null
-  let hadMeasurement = false
-  const overallRmsDb = await measureOverallRms(filePath)
-  if (!Number.isFinite(overallRmsDb)) {
-    qualityDebug('Unable to compute overall RMS; aborting quality analysis')
+  if (!FFMPEG_PATH || !FFPROBE_PATH) return null
+  const audio = await decodeAudioData(filePath)
+  if (!audio) {
+    qualityDebug('Failed to decode PCM data; skipping analysis.')
     return null
   }
-  qualityDebug('Overall RMS level:', overallRmsDb)
-  qualityDebug('Starting quality probe for:', filePath)
-  qualityDebug('Using frequency steps (ascending):', QUALITY_FREQ_STEPS)
 
-  const measurements = []
-  let prevRms = null
+  const maxFreq = detectMaxFrequency(audio.monoData, audio.sampleRate)
+  const { verdictKey, verdictLabel } = classifyVerdict(audio.sampleRate, maxFreq)
 
-  for (const step of QUALITY_FREQ_STEPS) {
-    qualityDebug(`Measuring RMS above ${step.freq} Hz`)
-    const rms = await measureHighFreqEnergy(filePath, step.freq)
-    if (rms === null) {
-      qualityDebug(`Measurement failed for ${step.freq} Hz; trying next tier.`)
-      continue
+  let drStatus = 'ok'
+  let dynamicRange = null
+  let avgPeakDb = null
+  let avgRmsDb = null
+  try {
+    const dr = computeDynamicRange(audio.channelData, audio.sampleRate)
+    dynamicRange = dr.dynamicRange
+    avgPeakDb = dr.avgPeakDb
+    avgRmsDb = dr.avgRmsDb
+  } catch (error) {
+    if (error instanceof TooShortError) {
+      drStatus = 'too_short'
+    } else if (error instanceof SilentTrackError) {
+      drStatus = 'silent_track'
+    } else {
+      throw error
     }
-    hadMeasurement = true
-    qualityDebug(`RMS for ${step.freq} Hz: ${rms} dB`)
-    const delta = overallRmsDb - rms
-    const dropFromPrev = prevRms === null ? null : prevRms - rms
-    qualityDebug(
-      `Delta vs fullband: ${delta.toFixed(2)} dB (threshold ${step.maxDeltaDb} dB); drop from prev: ${dropFromPrev === null ? 'n/a' : dropFromPrev.toFixed(2) + ' dB'}`
-    )
-    measurements.push({ step, rms, delta, dropFromPrev })
-    prevRms = rms
   }
 
-  if (!hadMeasurement || measurements.length === 0) {
-    qualityDebug('All measurements failed; returning null to skip caption update.')
+  const lufs = await measureIntegratedLoudness(filePath)
+
+  const details = {
+    file: path.basename(filePath),
+    sample_rate: audio.sampleRate,
+    nyquist_freq: audio.sampleRate / 2,
+    max_significant_freq: maxFreq,
+    verdict_key: verdictKey,
+    verdict_label: verdictLabel,
+    dr_status: drStatus,
+    dynamic_range: dynamicRange,
+    avg_peak_db: avgPeakDb,
+    avg_rms_db: avgRmsDb,
+    lufs
+  }
+
+  qualityDebug('Analyzed quality metrics:', details)
+  return buildQualityInfo(details)
+}
+
+async function decodeAudioData(filePath) {
+  const meta = await probeAudioStream(filePath)
+  if (!meta) return null
+  const sampleRate = Number(meta.sample_rate)
+  const channels = Math.max(1, Number(meta.channels) || 1)
+  if (!sampleRate || !Number.isFinite(sampleRate)) {
+    qualityDebug('Unable to read sample rate from ffprobe output:', meta)
     return null
   }
 
-  const dropIndex = measurements.findIndex(entry =>
-    entry.dropFromPrev !== null && entry.dropFromPrev >= QUALITY_DROP_THRESHOLD_DB
-  )
+  const pcm = await decodeToFloat32(filePath, channels, sampleRate)
+  if (!pcm) return null
 
-  let maxAllowedIndex = measurements.length - 1
-  if (dropIndex > 0) {
-    maxAllowedIndex = dropIndex - 1
-    qualityDebug(
-      `Detected spectral drop of ${measurements[dropIndex].dropFromPrev?.toFixed(2)} dB at ${measurements[dropIndex].step.freq} Hz; limiting classification to <= ${measurements[maxAllowedIndex].step.freq} Hz`
-    )
+  const samplesPerChannel = Math.floor(pcm.length / channels)
+  if (!Number.isFinite(samplesPerChannel) || samplesPerChannel <= 0) {
+    qualityDebug('PCM decode returned no samples')
+    return null
   }
 
-  for (let i = maxAllowedIndex; i >= 0; i--) {
-    const measurement = measurements[i]
-    if (measurement.delta <= measurement.step.maxDeltaDb) {
-      const label = messages.qualityLabel(measurement.step.labelKey)
-      selected = {
-        cutoffHz: measurement.step.freq,
-        rating: measurement.step.rating,
-        text: `~${(measurement.step.freq / 1000).toFixed(1)} kHz (${label})`
+  const channelData = Array.from({ length: channels }, () => new Float64Array(samplesPerChannel))
+  for (let i = 0; i < samplesPerChannel; i++) {
+    for (let ch = 0; ch < channels; ch++) {
+      channelData[ch][i] = pcm[i * channels + ch]
+    }
+  }
+
+  const monoData = new Float64Array(samplesPerChannel)
+  for (let i = 0; i < samplesPerChannel; i++) {
+    let sum = 0
+    for (let ch = 0; ch < channels; ch++) {
+      sum += channelData[ch][i]
+    }
+    monoData[i] = sum / channels
+  }
+
+  return { sampleRate, channels, channelData, monoData }
+}
+
+function probeAudioStream(filePath) {
+  return new Promise(resolve => {
+    const args = [
+      '-v',
+      'error',
+      '-select_streams',
+      'a:0',
+      '-show_entries',
+      'stream=sample_rate,channels',
+      '-of',
+      'json',
+      filePath
+    ]
+
+    const child = spawn(FFPROBE_PATH, args)
+    let stdout = ''
+    let stderr = ''
+
+    child.stdout.on('data', chunk => {
+      stdout += chunk.toString()
+    })
+
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString()
+    })
+
+    child.on('error', error => {
+      console.warn('Unable to start ffprobe:', error)
+      qualityDebug('ffprobe spawn error:', error)
+      resolve(null)
+    })
+
+    child.on('close', code => {
+      if (code !== 0) {
+        console.warn(`ffprobe exited with code ${code}`)
+        qualityDebug('ffprobe stderr:', stderr)
+        resolve(null)
+        return
       }
-      qualityDebug('Selected tier:', selected)
-      break
+
+      try {
+        const parsed = JSON.parse(stdout)
+        if (parsed?.streams?.length) {
+          resolve(parsed.streams[0])
+          return
+        }
+      } catch (error) {
+        console.warn('Unable to parse ffprobe output as JSON:', error)
+        qualityDebug('ffprobe output:', stdout)
+      }
+      resolve(null)
+    })
+  })
+}
+
+function decodeToFloat32(filePath, channels, sampleRate) {
+  return new Promise(resolve => {
+    const args = [
+      '-hide_banner',
+      '-nostats',
+      '-i',
+      filePath,
+      '-vn',
+      '-acodec',
+      'pcm_f32le',
+      '-f',
+      'f32le',
+      '-ac',
+      String(channels),
+      '-ar',
+      String(sampleRate),
+      'pipe:1'
+    ]
+
+    const child = spawn(FFMPEG_PATH, args)
+    const chunks = []
+    let stderr = ''
+
+    child.stdout.on('data', chunk => {
+      chunks.push(chunk)
+    })
+
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString()
+    })
+
+    child.on('error', error => {
+      console.warn('Unable to start ffmpeg PCM decode:', error)
+      qualityDebug('ffmpeg decode error:', error)
+      resolve(null)
+    })
+
+    child.on('close', code => {
+      if (code !== 0) {
+        console.warn(`ffmpeg PCM decode failed (code ${code})`)
+        qualityDebug('ffmpeg decode stderr:', stderr.slice(-2000))
+        resolve(null)
+        return
+      }
+      const buffer = Buffer.concat(chunks)
+      if (!buffer.length) {
+        qualityDebug('ffmpeg produced empty PCM stream')
+        resolve(null)
+        return
+      }
+      const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
+      const floatArray = new Float32Array(arrayBuffer)
+      resolve(floatArray)
+    })
+  })
+}
+
+function detectMaxFrequency(samples, sampleRate) {
+  const windowSize = 2048
+  const hopLength = 512
+  if (!samples || samples.length < windowSize) return null
+  const numFrames = Math.floor((samples.length - windowSize) / hopLength) + 1
+  if (numFrames <= 0) return null
+  const freqBins = windowSize / 2 + 1
+  const magnitudes = Array.from({ length: freqBins }, () => new Float64Array(numFrames))
+  const window = getHannWindow(windowSize)
+  const { cosTable, sinTable } = getFftTables(windowSize)
+  const real = new Float64Array(windowSize)
+  const imag = new Float64Array(windowSize)
+  let maxAmp = 0
+
+  for (let frame = 0; frame < numFrames; frame++) {
+    const offset = frame * hopLength
+    for (let i = 0; i < windowSize; i++) {
+      real[i] = samples[offset + i] * window[i]
+      imag[i] = 0
+    }
+    fftRadix2(real, imag, cosTable, sinTable)
+    for (let bin = 0; bin < freqBins; bin++) {
+      const mag = Math.hypot(real[bin], imag[bin])
+      magnitudes[bin][frame] = mag
+      if (mag > maxAmp) maxAmp = mag
     }
   }
 
-  if (selected) {
-    return selected
+  if (maxAmp <= 0) return null
+
+  const dbMatrix = magnitudes.map(column => {
+    const arr = new Float64Array(numFrames)
+    for (let i = 0; i < numFrames; i++) {
+      const ratio = Math.max(1e-12, column[i] / maxAmp)
+      arr[i] = 20 * Math.log10(ratio)
+    }
+    return arr
+  })
+
+  const smoothed = smoothSpectrogram(dbMatrix)
+  const meanDb = computeMean(smoothed)
+  const stdDb = computeStd(smoothed, meanDb)
+  const baseThreshold = meanDb + 1.5 * stdDb
+  const hfThreshold = 18
+  const nyquist = sampleRate / 2
+  let maxSignificant = null
+
+  for (let bin = 0; bin < freqBins; bin++) {
+    const freq = (bin * sampleRate) / windowSize
+    const threshold = baseThreshold - hfThreshold * (freq / nyquist)
+    const column = smoothed[bin]
+    for (let frame = 0; frame < numFrames; frame++) {
+      if (column[frame] > threshold) {
+        maxSignificant = freq
+      }
+    }
   }
 
-  qualityDebug('No tier matched thresholds; using fallback label.')
+  return maxSignificant ? Math.ceil(maxSignificant) : null
+}
+
+function getHannWindow(size) {
+  const window = new Float64Array(size)
+  for (let i = 0; i < size; i++) {
+    window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (size - 1))
+  }
+  return window
+}
+
+const FFT_TABLE_CACHE = new Map()
+
+function getFftTables(size) {
+  if (!FFT_TABLE_CACHE.has(size)) {
+    const cosTable = new Float64Array(size / 2)
+    const sinTable = new Float64Array(size / 2)
+    for (let i = 0; i < size / 2; i++) {
+      cosTable[i] = Math.cos((-2 * Math.PI * i) / size)
+      sinTable[i] = Math.sin((-2 * Math.PI * i) / size)
+    }
+    FFT_TABLE_CACHE.set(size, { cosTable, sinTable })
+  }
+  return FFT_TABLE_CACHE.get(size)
+}
+
+function fftRadix2(real, imag, cosTable, sinTable) {
+  const n = real.length
+  if ((n & (n - 1)) !== 0) {
+    throw new Error('FFT size must be power of two')
+  }
+
+  let j = 0
+  for (let i = 1; i < n; i++) {
+    let bit = n >> 1
+    while (j & bit) {
+      j &= ~bit
+      bit >>= 1
+    }
+    j |= bit
+    if (i < j) {
+      ;[real[i], real[j]] = [real[j], real[i]]
+      ;[imag[i], imag[j]] = [imag[j], imag[i]]
+    }
+  }
+
+  for (let size = 2; size <= n; size <<= 1) {
+    const halfSize = size >> 1
+    const tableStep = n / size
+    for (let i = 0; i < n; i += size) {
+      for (let k = 0; k < halfSize; k++) {
+        const l = i + k + halfSize
+        const jIndex = k * tableStep
+        const tpre = real[l] * cosTable[jIndex] - imag[l] * sinTable[jIndex]
+        const tpim = real[l] * sinTable[jIndex] + imag[l] * cosTable[jIndex]
+        real[l] = real[i + k] - tpre
+        imag[l] = imag[i + k] - tpim
+        real[i + k] += tpre
+        imag[i + k] += tpim
+      }
+    }
+  }
+}
+
+const SG_COEFF_CACHE = new Map()
+
+function smoothSpectrogram(dbMatrix) {
+  const numBins = dbMatrix.length
+  if (!numBins) return dbMatrix
+  const numFrames = dbMatrix[0].length
+  const windowSize = 11
+  const polyOrder = 2
+  const result = Array.from({ length: numBins }, () => new Float64Array(numFrames))
+
+  for (let frame = 0; frame < numFrames; frame++) {
+    const column = new Float64Array(numBins)
+    for (let bin = 0; bin < numBins; bin++) {
+      column[bin] = dbMatrix[bin][frame]
+    }
+    const smoothedColumn = applySavitzkyGolay(column, windowSize, polyOrder)
+    for (let bin = 0; bin < numBins; bin++) {
+      result[bin][frame] = smoothedColumn[bin]
+    }
+  }
+
+  return result
+}
+
+function applySavitzkyGolay(series, windowSize, polyOrder) {
+  if (series.length === 0) return series
+  if (windowSize % 2 === 0) throw new Error('Savitzky-Golay window must be odd')
+  const coeffs = getSavitzkyGolayCoefficients(windowSize, polyOrder)
+  const half = (windowSize - 1) / 2
+  const output = new Float64Array(series.length)
+
+  for (let i = 0; i < series.length; i++) {
+    let acc = 0
+    for (let j = 0; j < windowSize; j++) {
+      let idx = i + j - half
+      if (idx < 0) idx = 0
+      if (idx >= series.length) idx = series.length - 1
+      acc += coeffs[j] * series[idx]
+    }
+    output[i] = acc
+  }
+
+  return output
+}
+
+function getSavitzkyGolayCoefficients(windowSize, polyOrder) {
+  const key = `${windowSize}:${polyOrder}`
+  if (SG_COEFF_CACHE.has(key)) return SG_COEFF_CACHE.get(key)
+  const half = (windowSize - 1) / 2
+  const order = polyOrder + 1
+  const A = Array.from({ length: windowSize }, (_, row) => {
+    const k = row - half
+    return Array.from({ length: order }, (_, col) => Math.pow(k, col))
+  })
+  const AT = transpose(A)
+  const ATA = multiply(AT, A)
+  const ATAInv = invert(ATA)
+  const pinv = multiply(ATAInv, AT)
+  const coeffs = pinv[0]
+  SG_COEFF_CACHE.set(key, coeffs)
+  return coeffs
+}
+
+function transpose(matrix) {
+  return matrix[0].map((_, colIndex) => matrix.map(row => row[colIndex]))
+}
+
+function multiply(a, b) {
+  const rows = a.length
+  const cols = b[0].length
+  const shared = b.length
+  const result = Array.from({ length: rows }, () => Array(cols).fill(0))
+  for (let i = 0; i < rows; i++) {
+    for (let k = 0; k < shared; k++) {
+      for (let j = 0; j < cols; j++) {
+        result[i][j] += a[i][k] * b[k][j]
+      }
+    }
+  }
+  return result
+}
+
+function invert(matrix) {
+  const n = matrix.length
+  const augmented = matrix.map((row, i) => [...row, ...identityRow(n, i)])
+  for (let i = 0; i < n; i++) {
+    let pivot = augmented[i][i]
+    if (Math.abs(pivot) < 1e-12) {
+      for (let j = i + 1; j < n; j++) {
+        if (Math.abs(augmented[j][i]) > Math.abs(pivot)) {
+          ;[augmented[i], augmented[j]] = [augmented[j], augmented[i]]
+          pivot = augmented[i][i]
+          break
+        }
+      }
+    }
+    if (Math.abs(pivot) < 1e-12) {
+      throw new Error('Matrix not invertible')
+    }
+    for (let j = 0; j < 2 * n; j++) {
+      augmented[i][j] /= pivot
+    }
+    for (let k = 0; k < n; k++) {
+      if (k === i) continue
+      const factor = augmented[k][i]
+      for (let j = 0; j < 2 * n; j++) {
+        augmented[k][j] -= factor * augmented[i][j]
+      }
+    }
+  }
+  return augmented.map(row => row.slice(n))
+}
+
+function identityRow(size, index) {
+  return Array.from({ length: size }, (_, i) => (i === index ? 1 : 0))
+}
+
+function computeMean(matrix) {
+  let sum = 0
+  let count = 0
+  for (const column of matrix) {
+    for (const value of column) {
+      sum += value
+      count++
+    }
+  }
+  return count ? sum / count : 0
+}
+
+function computeStd(matrix, mean) {
+  let sum = 0
+  let count = 0
+  for (const column of matrix) {
+    for (const value of column) {
+      const diff = value - mean
+      sum += diff * diff
+      count++
+    }
+  }
+  return count ? Math.sqrt(sum / count) : 0
+}
+
+function computeDynamicRange(channelData, sampleRate) {
+  if (!channelData.length) throw new TooShortError()
+  const blockSize = Math.max(1, Math.floor(sampleRate * 3))
+  const totalFrames = channelData[0].length
+  const numBlocks = Math.floor(totalFrames / blockSize)
+  if (numBlocks < 1) {
+    throw new TooShortError()
+  }
+
+  const drs = []
+  const avgPeaks = []
+  const avgRmss = []
+  for (const channel of channelData) {
+    const stats = analyzeChannelBlocks(channel, blockSize, numBlocks)
+    drs.push(stats.dr)
+    avgPeaks.push(stats.avgPeak)
+    avgRmss.push(stats.avgRms)
+  }
+
   return {
-    cutoffHz: 0,
-    rating: 'très basse',
-    text: QUALITY_FALLBACK_LABEL
+    dynamicRange: roundTo(drs.reduce((acc, val) => acc + val, 0) / drs.length, 2),
+    avgPeakDb: toDb(average(avgPeaks)),
+    avgRmsDb: toDb(average(avgRmss))
   }
 }
 
-function measureHighFreqEnergy(filePath, cutoffHz) {
-  return new Promise(resolve => {
-    qualityDebug(`Spawning ffmpeg for cutoff ${cutoffHz} Hz`)
-    const args = [
-      '-hide_banner',
-      '-loglevel', 'info',
-      '-nostats',
-      '-i', filePath,
-      '-filter_complex', `highpass=f=${cutoffHz},astats=metadata=1:reset=0:measure_overall=1`,
-      '-f', 'null',
-      '-'
-    ]
-
-    const child = spawn(FFMPEG_PATH, args)
-    let stderr = ''
-
-    child.stderr.on('data', chunk => {
-      stderr += chunk.toString()
-    })
-
-    child.on('error', error => {
-      console.warn('Unable to start ffmpeg for quality probe:', error)
-      qualityDebug('ffmpeg spawn error:', error)
-      resolve(null)
-    })
-
-    child.on('close', code => {
-      if (code !== 0) {
-        console.warn(`ffmpeg quality probe failed (code ${code})`)
-        qualityDebug(`ffmpeg exited with code ${code}`)
-        resolve(null)
-        return
-      }
-      const rms = extractRmsFromAstStats(stderr)
-      if (rms === null) {
-        qualityDebug('No RMS matches in ffmpeg stderr output; raw stderr follows:')
-        qualityDebug(stderr.slice(-2000))
-        resolve(null)
-        return
-      }
-      qualityDebug('Parsed RMS value:', rms)
-      resolve(rms)
-    })
-  })
-}
-
-async function measureOverallRms(filePath) {
-  return new Promise(resolve => {
-    qualityDebug('Measuring full-band RMS for', filePath)
-    const args = [
-      '-hide_banner',
-      '-loglevel', 'info',
-      '-nostats',
-      '-i', filePath,
-      '-filter_complex', 'astats=metadata=1:reset=0:measure_overall=1',
-      '-f', 'null',
-      '-'
-    ]
-
-    const child = spawn(FFMPEG_PATH, args)
-    let stderr = ''
-
-    child.stderr.on('data', chunk => {
-      stderr += chunk.toString()
-    })
-
-    child.on('error', error => {
-      console.warn('Unable to start ffmpeg for overall RMS probe:', error)
-      qualityDebug('Full-band ffmpeg spawn error:', error)
-      resolve(null)
-    })
-
-    child.on('close', code => {
-      if (code !== 0) {
-        console.warn(`ffmpeg overall RMS probe failed (code ${code})`)
-        qualityDebug(`Full-band ffmpeg exited with code ${code}`)
-        resolve(null)
-        return
-      }
-      const rms = extractRmsFromAstStats(stderr)
-      if (rms === null) {
-        qualityDebug('No RMS in overall probe output; raw stderr:')
-        qualityDebug(stderr.slice(-2000))
-      }
-      resolve(rms)
-    })
-  })
-}
-
-function extractRmsFromAstStats(output) {
-  const regexes = [
-    /Overall\.RMS_level:\s*(-?\d+(?:\.\d+)?)/i,
-    /RMS level dB:\s*(-?\d+(?:\.\d+)?)/i,
-    /RMS_level dB:\s*(-?\d+(?:\.\d+)?)/i
-  ]
-
-  for (const pattern of regexes) {
-    const match = pattern.exec(output)
-    if (match) {
-      const value = Number(match[1])
-      return Number.isFinite(value) ? value : null
+function analyzeChannelBlocks(channelSamples, blockSize, numBlocks) {
+  const peaks = []
+  const rmss = []
+  for (let block = 0; block < numBlocks; block++) {
+    const start = block * blockSize
+    const end = start + blockSize
+    let peak = 0
+    let sumSquares = 0
+    for (let i = start; i < end; i++) {
+      const sample = channelSamples[i]
+      const absVal = Math.abs(sample)
+      if (absVal > peak) peak = absVal
+      sumSquares += sample * sample
     }
+    peaks.push(peak)
+    rmss.push(Math.sqrt(sumSquares / blockSize))
   }
 
-  return null
+  peaks.sort((a, b) => a - b)
+  rmss.sort((a, b) => a - b)
+  if (peaks.length < 2) throw new TooShortError()
+  const p2 = peaks[peaks.length - 2]
+  if (p2 === 0) throw new SilentTrackError()
+  const topCount = Math.floor(0.2 * rmss.length)
+  if (topCount <= 0) throw new TooShortError()
+  let rmsSum = 0
+  for (let i = rmss.length - topCount; i < rmss.length; i++) {
+    rmsSum += rmss[i] * rmss[i]
+  }
+  const r = Math.sqrt(rmsSum / topCount)
+  const dr = -toDb(r / p2)
+  return {
+    dr,
+    avgPeak: average(peaks),
+    avgRms: average(rmss)
+  }
+}
+
+function classifyVerdict(sampleRate, maxFreq) {
+  const nyquist = sampleRate / 2
+  if (maxFreq === null || !Number.isFinite(maxFreq)) {
+    return { verdictKey: 'unknown', verdictLabel: "Can't determine" }
+  }
+  if (sampleRate === 48000) {
+    if (maxFreq < 20000) return { verdictKey: 'fake', verdictLabel: 'Fake' }
+    if (maxFreq < nyquist * 0.5) return { verdictKey: 'likely_fake', verdictLabel: 'Most likely Fake' }
+    if (maxFreq < nyquist * 0.8) return { verdictKey: 'maybe_fake', verdictLabel: 'Might be Fake' }
+    if (maxFreq < nyquist * 0.9) return { verdictKey: 'maybe_authentic', verdictLabel: 'Might be Authentic' }
+    if (maxFreq < nyquist * 0.99)
+      return { verdictKey: 'likely_authentic', verdictLabel: 'Most likely Authentic' }
+    return { verdictKey: 'authentic', verdictLabel: 'Authentic' }
+  }
+  if (sampleRate > 48000) {
+    if (maxFreq < 22050) return { verdictKey: 'fake', verdictLabel: 'Fake' }
+    if (maxFreq < nyquist * 0.5) return { verdictKey: 'likely_fake', verdictLabel: 'Most likely Fake' }
+    if (maxFreq < nyquist * 0.8) return { verdictKey: 'maybe_fake', verdictLabel: 'Might be Fake' }
+    if (maxFreq < nyquist * 0.9)
+      return { verdictKey: 'maybe_authentic', verdictLabel: 'Might be Authentic' }
+    if (maxFreq < nyquist * 0.99)
+      return { verdictKey: 'likely_authentic', verdictLabel: 'Most likely Authentic' }
+    return { verdictKey: 'authentic', verdictLabel: 'Authentic' }
+  }
+
+  const reference = 22050
+  if (maxFreq < reference * 0.8) return { verdictKey: 'fake', verdictLabel: 'Fake' }
+  if (maxFreq < reference * 0.85)
+    return { verdictKey: 'likely_fake', verdictLabel: 'Most likely Fake' }
+  if (maxFreq < reference * 0.9) return { verdictKey: 'maybe_fake', verdictLabel: 'Might be Fake' }
+  if (maxFreq < reference * 0.95)
+    return { verdictKey: 'maybe_authentic', verdictLabel: 'Might be Authentic' }
+  if (maxFreq < reference * 0.99)
+    return { verdictKey: 'likely_authentic', verdictLabel: 'Most likely Authentic' }
+  return { verdictKey: 'authentic', verdictLabel: 'Authentic' }
+}
+
+function average(values) {
+  if (!values.length) return 0
+  return values.reduce((sum, val) => sum + val, 0) / values.length
+}
+
+function toDb(value) {
+  if (!Number.isFinite(value) || value <= 0) return -Infinity
+  return Number((20 * Math.log10(value)).toFixed(2))
+}
+
+function roundTo(value, decimals = 2) {
+  if (!Number.isFinite(value)) return null
+  const factor = 10 ** decimals
+  return Math.round(value * factor) / factor
+}
+
+async function measureIntegratedLoudness(filePath) {
+  return new Promise(resolve => {
+    const args = [
+      '-hide_banner',
+      '-nostats',
+      '-i',
+      filePath,
+      '-filter_complex',
+      'ebur128=peak=true',
+      '-f',
+      'null',
+      '-'
+    ]
+
+    const child = spawn(FFMPEG_PATH, args)
+    let stderr = ''
+
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString()
+    })
+
+    child.on('error', error => {
+      console.warn('Unable to start ffmpeg loudness probe:', error)
+      qualityDebug('ffmpeg loudness error:', error)
+      resolve(null)
+    })
+
+    child.on('close', code => {
+      if (code !== 0) {
+        console.warn(`ffmpeg loudness probe failed (code ${code})`)
+        qualityDebug('ffmpeg loudness stderr:', stderr.slice(-2000))
+        resolve(null)
+        return
+      }
+      const match = stderr.match(/Integrated loudness:\s*(-?\d+(?:\.\d+)?) LUFS/i)
+      if (match) {
+        resolve(Number(match[1]))
+        return
+      }
+      resolve(null)
+    })
+  })
+}
+
+function buildQualityInfo(details) {
+  const verdictLabel = messages.qualityVerdict(details.verdict_key, details.verdict_label)
+  const parts = []
+  if (verdictLabel) parts.push(verdictLabel)
+  const maxFreqText = formatMaxFrequency(details.max_significant_freq)
+  if (maxFreqText) parts.push(maxFreqText)
+  const drText = formatDynamicRange(details.dynamic_range, details.dr_status)
+  if (drText) parts.push(drText)
+  const lufsText = formatLufs(details.lufs)
+  if (lufsText) parts.push(lufsText)
+
+  const text = parts.length ? parts.join(' • ') : messages.qualityFallbackLabel()
+
+  return {
+    rating: details.verdict_key,
+    text,
+    details
+  }
+}
+
+function formatMaxFrequency(value) {
+  if (!Number.isFinite(value)) return null
+  return `max ${(value / 1000).toFixed(1)} kHz`
+}
+
+function formatDynamicRange(value, status) {
+  if (status === 'too_short') return 'DR n/a (too short)'
+  if (status === 'silent_track') return 'DR n/a (silent track)'
+  if (!Number.isFinite(value)) return null
+  return `DR ${value.toFixed(1)}`
+}
+
+function formatLufs(value) {
+  if (!Number.isFinite(value)) return null
+  return `${value.toFixed(1)} LUFS`
 }
 
 async function handleDownloadJob(ctx, url) {
