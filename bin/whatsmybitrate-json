@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
+VENDOR = os.path.join(ROOT, "vendor", "whatsmybitrate")
+
+if VENDOR not in sys.path:
+    sys.path.insert(0, VENDOR)
+
+from wmb_core import AudioFile  # type: ignore
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.stderr.write("usage: whatsmybitrate-json <audio-file>\n")
+        sys.exit(1)
+
+    file_path = sys.argv[1]
+    if not os.path.isfile(file_path):
+        sys.stderr.write(f"file not found: {file_path}\n")
+        sys.exit(1)
+
+    audio = AudioFile(file_path)
+    audio.analyze(generate_spectrogram_flag=False, assets_dir=None)
+    print(json.dumps(audio.to_dict()))
+
+
+if __name__ == "__main__":
+    main()
