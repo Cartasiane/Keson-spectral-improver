@@ -72,6 +72,13 @@ module.exports = {
   qualityVerdict(key, fallbackLabel) {
     return QUALITY_VERDICTS[key] || fallbackLabel || QUALITY_VERDICTS.unknown
   },
+  bitrateLine(measured, source, warning) {
+    const base = source ? `Débit: ${measured} kbps (source ${source} kbps)` : `Débit: ${measured} kbps`
+    return warning ? `${base} ⚠️` : base
+  },
+  bitrateDropWarning(measured, source) {
+    return `⚠️ Débit estimé ${measured} kbps, inférieur à la source (${source} kbps).`
+  },
   opusOnlyMessage() {
     return 'Impossible de DL en opus bb, trouve une autre version.'
   },

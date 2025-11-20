@@ -5,7 +5,8 @@
   "main": "src/bot.js",
   "scripts": {
     "start": "node src/bot.js",
-    "lint": "node --check src/bot.js"
+    "lint": "node --check src/bot.js",
+    "quality:analyze": "node scripts/test-quality.js"
   },
   "keywords": [],
   "author": "",
