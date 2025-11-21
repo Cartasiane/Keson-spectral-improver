@@ -81,6 +81,23 @@ module.exports = {
   lowBitrateWarning(measured, min = 256) {
     return `⚠️ Débit estimé ${measured} kbps.`
   },
+  playlistDetected(count, chunkSize, cap) {
+    return `Playlist détectée (${count} titres, limite ${cap}). Je lance ${chunkSize} premiers, puis je te demande si on continue.`
+  },
+  playlistNoEntries() {
+    return "Je n'ai trouvé aucun track dans cette playlist."
+  },
+  playlistChunkPrompt(downloaded, total, chunkSize) {
+    const remaining = Math.max(total - downloaded, 0)
+    const nextCount = Math.min(chunkSize, remaining)
+    return `J'ai envoyé ${downloaded}/${total} titres. Continuer avec ${nextCount} de plus ?`
+  },
+  playlistDone() {
+    return 'Playlist terminée.'
+  },
+  playlistStopped() {
+    return 'Ok, j’arrête la playlist.'
+  },
   opusOnlyMessage() {
     return 'Impossible de DL en opus bb, trouve une autre version.'
   },

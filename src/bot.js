@@ -18,7 +18,7 @@ const {
   validateRequiredEnv
 } = require('./config')
 const { buildCaption } = require('./captions')
-const { downloadTrack, cleanupTempDir } = require('./downloader')
+const { downloadTrack, cleanupTempDir, fetchPlaylistTracks } = require('./downloader')
 const { analyzeTrackQuality, qualityDebug } = require('./quality')
 const { createTaskQueue } = require('./queue')
 const { isIdhsSupportedLink, resolveLinkViaIdhs } = require('./idhs')
@@ -36,7 +36,8 @@ const {
   extractFirstUrl,
   extractSoundCloudUrl,
   formatUserFacingError,
-  isBotCommand
+  isBotCommand,
+  isSoundCloudPlaylist
 } = require('./utils')
 
 validateRequiredEnv()
@@ -45,6 +46,9 @@ const bot = new Bot(BOT_TOKEN)
 const awaitingPassword = new Set()
 const downloadQueue = createTaskQueue(MAX_CONCURRENT_DOWNLOADS, MAX_PENDING_DOWNLOADS)
 let isShuttingDown = false
+const playlistSessions = new Map()
+const PLAYLIST_CHUNK_SIZE = 10
+const PLAYLIST_MAX_ITEMS = 100
 
 setupSignalHandlers()
 
@@ -108,6 +112,11 @@ bot.on('message:text', async ctx => {
     return
   }
 
+  if (isSoundCloudPlaylist(url)) {
+    await handlePlaylistRequest(ctx, url)
+    return
+  }
+
   await ctx.reply(messages.downloadPrep())
 
   try {
@@ -122,10 +131,105 @@ bot.catch(err => {
   console.error('Bot error:', err)
 })
 
+bot.on('callback_query:data', async ctx => {
+  const data = ctx.callbackQuery.data || ''
+  if (!data.startsWith('pl:')) return
+  const [, action, sessionId] = data.split(':')
+  const session = playlistSessions.get(sessionId)
+  if (!session) {
+    await ctx.answerCallbackQuery({ text: 'Session expirée', show_alert: false })
+    return
+  }
+  if (ctx.from?.id !== session.userId) {
+    await ctx.answerCallbackQuery({ text: "Ce n'est pas ta playlist ;)", show_alert: true })
+    return
+  }
+
+  if (action === 'stop') {
+    playlistSessions.delete(sessionId)
+    await ctx.answerCallbackQuery({ text: 'Arrêté' })
+    await ctx.editMessageText(messages.playlistStopped())
+    return
+  }
+
+  if (action === 'cont') {
+    await ctx.answerCallbackQuery({ text: 'On continue' })
+    await ctx.editMessageText(messages.playlistChunkPrompt(session.nextIndex, session.tracks.length, PLAYLIST_CHUNK_SIZE))
+    enqueueNextTrack(ctx, sessionId)
+  }
+})
+
 initializeBot().catch(error => {
   console.error('Failed to start bot:', error)
   process.exit(1)
 })
+
+async function handlePlaylistRequest(ctx, url) {
+  const entries = await fetchPlaylistTracks(url, PLAYLIST_MAX_ITEMS)
+  if (!entries.length) {
+    await ctx.reply(messages.playlistNoEntries())
+    return
+  }
+  const sessionId = `${ctx.from.id}-${Date.now()}`
+  const session = {
+    id: sessionId,
+    userId: ctx.from.id,
+    tracks: entries,
+    nextIndex: 0,
+    promptMessageId: null
+  }
+  playlistSessions.set(sessionId, session)
+  await ctx.reply(messages.playlistDetected(entries.length, PLAYLIST_CHUNK_SIZE, PLAYLIST_MAX_ITEMS))
+  enqueueNextTrack(ctx, sessionId)
+}
+
+async function enqueueNextTrack(ctx, sessionId) {
+  const session = playlistSessions.get(sessionId)
+  if (!session) return
+
+  if (session.nextIndex >= session.tracks.length) {
+    await ctx.reply(messages.playlistDone())
+    playlistSessions.delete(sessionId)
+    return
+  }
+
+  if (session.nextIndex > 0 && session.nextIndex % PLAYLIST_CHUNK_SIZE === 0) {
+    const msg = await ctx.reply(
+      messages.playlistChunkPrompt(session.nextIndex, session.tracks.length, PLAYLIST_CHUNK_SIZE),
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '▶️ Continuer', callback_data: `pl:cont:${sessionId}` },
+              { text: '🛑 Stop', callback_data: `pl:stop:${sessionId}` }
+            ]
+          ]
+        }
+      }
+    )
+    session.promptMessageId = msg.message_id
+    playlistSessions.set(sessionId, session)
+    return
+  }
+
+  const trackUrl = session.tracks[session.nextIndex]
+  session.nextIndex += 1
+  playlistSessions.set(sessionId, session)
+
+  try {
+    await downloadQueue.add(() => handleDownloadJob(ctx, trackUrl))
+    await enqueueNextTrack(ctx, sessionId)
+  } catch (error) {
+    console.error('Playlist track failed:', error)
+    await ctx.reply(formatUserFacingError(error))
+    // if queue full, stop playlist
+    if (error?.code === 'QUEUE_FULL') {
+      playlistSessions.delete(sessionId)
+      return
+    }
+    await enqueueNextTrack(ctx, sessionId)
+  }
+}
 
 async function handlePasswordFlow(ctx, userId) {
   const text = (ctx.message.text || '').trim()

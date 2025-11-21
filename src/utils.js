@@ -73,12 +73,22 @@ function truncate(text, max = 140) {
   return `${text.slice(0, max - 1)}…`
 }
 
+function isSoundCloudPlaylist(url) {
+  try {
+    const u = new URL(url)
+    return /soundcloud\.com/i.test(u.hostname) && /\/sets\//i.test(u.pathname)
+  } catch {
+    return false
+  }
+}
+
 module.exports = {
   extractFirstUrl,
   extractReadableErrorText,
   extractSoundCloudUrl,
   formatUserFacingError,
   isBotCommand,
+  isSoundCloudPlaylist,
   pickUserFriendlyLine,
   truncate
 }

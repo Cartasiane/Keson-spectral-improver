@@ -223,7 +223,34 @@ async function pickAudioFile(tmpDir, files) {
   return { audioFile: audioCandidates[0], metadata: info }
 }
 
+async function fetchPlaylistTracks(url, limit = 100) {
+  const ytdlp = await getYtDlp()
+  try {
+    const output = await ytdlp(url, {
+      dumpSingleJson: true,
+      flatPlaylist: true,
+      skipDownload: true,
+      simulate: true,
+      playlistEnd: limit,
+      yesPlaylist: true,
+      noPlaylist: false,
+      quiet: true
+    })
+    const parsed = typeof output === 'string' ? JSON.parse(output) : output
+    if (parsed?.entries && Array.isArray(parsed.entries)) {
+      return parsed.entries
+        .map(entry => entry?.url)
+        .filter(u => typeof u === 'string')
+    }
+  } catch (error) {
+    console.warn('Unable to fetch playlist entries:', error)
+  }
+  return []
+}
+
 module.exports = {
   cleanupTempDir,
   downloadTrack
+  ,
+  fetchPlaylistTracks
 }
