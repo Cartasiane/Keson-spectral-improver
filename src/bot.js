@@ -274,6 +274,21 @@ async function sendPlaylistGroup(ctx, sessionId) {
 
   try {
     await ctx.replyWithMediaGroup(media)
+  } catch (error) {
+    // Fallback to individual sends if media group is too large (e.g., 413)
+    if (error?.description && /entity too large/i.test(error.description)) {
+      for (const item of session.buffer) {
+        const inputFile = new InputFile(
+          fs.createReadStream(item.download.path),
+          item.download.filename
+        )
+        const caption = buildCaption(item.download.metadata, item.qualityInfo)
+        await ctx.replyWithDocument(inputFile, { caption })
+      }
+    } else {
+      throw error
+    }
+  } finally {
     for (const item of session.buffer) {
       if (item.qualityInfo?.warning) {
         const meta = item.download.metadata || {}
@@ -286,7 +301,6 @@ async function sendPlaylistGroup(ctx, sessionId) {
     if (warnLines.length) {
       await ctx.reply(`⚠️ Qualité réduite sur:\n${warnLines.join('\n')}`)
     }
-  } finally {
     session.buffer = []
     playlistSessions.set(sessionId, session)
   }
