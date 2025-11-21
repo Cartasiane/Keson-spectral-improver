@@ -232,8 +232,6 @@ async function fetchPlaylistTracks(url, limit = 100) {
       skipDownload: true,
       simulate: true,
       playlistEnd: limit,
-      yesPlaylist: true,
-      noPlaylist: false,
       quiet: true
     })
     const parsed = typeof output === 'string' ? JSON.parse(output) : output

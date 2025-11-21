@@ -85,7 +85,7 @@ module.exports = {
     return `Playlist détectée (${count} titres, limite ${cap}). Je lance ${chunkSize} premiers, puis je te demande si on continue.`
   },
   playlistNoEntries() {
-    return "Je n'ai trouvé aucun track dans cette playlist."
+    return "Je n'ai trouvé aucun track dans cette playlist. (privée?)"
   },
   playlistChunkPrompt(downloaded, total, chunkSize) {
     const remaining = Math.max(total - downloaded, 0)
