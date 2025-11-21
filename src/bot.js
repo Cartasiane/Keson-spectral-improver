@@ -234,12 +234,7 @@ async function enqueueNextTrack(ctx, sessionId, force = false) {
         qualityInfo: result.qualityInfo,
         size: result.size
       })
-      if (
-        session.buffer.length >= PLAYLIST_GROUP_SIZE ||
-        session.nextIndex >= session.tracks.length
-      ) {
-        await sendPlaylistGroup(ctx, sessionId)
-      }
+      await sendPlaylistGroup(ctx, sessionId)
     })
     await enqueueNextTrack(ctx, sessionId)
   } catch (error) {
@@ -301,20 +296,20 @@ async function sendPlaylistGroup(ctx, sessionId) {
       }
     } finally {
       for (const item of batch) {
-        if (item.qualityInfo?.warning) {
-          const meta = item.download.metadata || {}
-          const name = meta.title || meta.fulltitle || item.download.filename
-          warnLines.push(`- ${name}: ${item.qualityInfo.warning}`)
-        }
+      if (item.qualityInfo?.warning) {
+        const meta = item.download.metadata || {}
+        const name = meta.title || meta.fulltitle || item.download.filename
+        warnLines.push(`- ${name}`)
+      }
         incrementDownloadCount()
         await cleanupTempDir(item.download.tempDir)
       }
     }
   }
 
-  if (warnLines.length) {
-    await ctx.reply(`⚠️ Qualité réduite sur:\n${warnLines.join('\n')}`)
-  }
+    if (warnLines.length) {
+      await ctx.reply(`⚠️ Qualité réduite sur:\n${warnLines.join('\n')}`)
+    }
 
   session.buffer = []
   playlistSessions.set(sessionId, session)
