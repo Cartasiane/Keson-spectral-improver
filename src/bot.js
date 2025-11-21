@@ -231,7 +231,8 @@ async function enqueueNextTrack(ctx, sessionId, force = false) {
       if (!result) return
       session.buffer.push({
         download: result.download,
-        qualityInfo: result.qualityInfo
+        qualityInfo: result.qualityInfo,
+        size: result.size
       })
       if (
         session.buffer.length >= PLAYLIST_GROUP_SIZE ||
@@ -257,53 +258,66 @@ async function sendPlaylistGroup(ctx, sessionId) {
   const session = playlistSessions.get(sessionId)
   if (!session || !session.buffer.length) return
 
-  const media = session.buffer.map((item, idx) => {
-    const inputFile = new InputFile(
-      fs.createReadStream(item.download.path),
-      item.download.filename
-    )
-    const caption = idx === 0 ? buildCaption(item.download.metadata, item.qualityInfo) : undefined
-    return {
-      type: 'document',
-      media: inputFile,
-      caption
-    }
-  })
-
   const warnLines = []
 
-  try {
-    await ctx.replyWithMediaGroup(media)
-  } catch (error) {
-    // Fallback to individual sends if media group is too large (e.g., 413)
-    if (error?.description && /entity too large/i.test(error.description)) {
-      for (const item of session.buffer) {
-        const inputFile = new InputFile(
-          fs.createReadStream(item.download.path),
-          item.download.filename
-        )
-        const caption = buildCaption(item.download.metadata, item.qualityInfo)
-        await ctx.replyWithDocument(inputFile, { caption })
+  while (session.buffer.length) {
+    let batchSize = 0
+    const batch = []
+    while (session.buffer.length) {
+      const item = session.buffer[0]
+      if (batch.length > 0 && batchSize + item.size > TELEGRAM_MAX_FILE_BYTES) break
+      session.buffer.shift()
+      batch.push(item)
+      batchSize += item.size
+    }
+
+    const media = batch.map((item, idx) => {
+      const inputFile = new InputFile(
+        fs.createReadStream(item.download.path),
+        item.download.filename
+      )
+      const caption = idx === 0 ? buildCaption(item.download.metadata, item.qualityInfo) : undefined
+      return {
+        type: 'document',
+        media: inputFile,
+        caption
       }
-    } else {
-      throw error
-    }
-  } finally {
-    for (const item of session.buffer) {
-      if (item.qualityInfo?.warning) {
-        const meta = item.download.metadata || {}
-        const name = meta.title || meta.fulltitle || item.download.filename
-        warnLines.push(`- ${name}: ${item.qualityInfo.warning}`)
+    })
+
+    try {
+      await ctx.replyWithMediaGroup(media)
+    } catch (error) {
+      if (error?.description && /entity too large/i.test(error.description)) {
+        for (const item of batch) {
+          const inputFile = new InputFile(
+            fs.createReadStream(item.download.path),
+            item.download.filename
+          )
+          const caption = buildCaption(item.download.metadata, item.qualityInfo)
+          await ctx.replyWithDocument(inputFile, { caption })
+        }
+      } else {
+        throw error
       }
-      incrementDownloadCount()
-      await cleanupTempDir(item.download.tempDir)
+    } finally {
+      for (const item of batch) {
+        if (item.qualityInfo?.warning) {
+          const meta = item.download.metadata || {}
+          const name = meta.title || meta.fulltitle || item.download.filename
+          warnLines.push(`- ${name}: ${item.qualityInfo.warning}`)
+        }
+        incrementDownloadCount()
+        await cleanupTempDir(item.download.tempDir)
+      }
     }
-    if (warnLines.length) {
-      await ctx.reply(`⚠️ Qualité réduite sur:\n${warnLines.join('\n')}`)
-    }
-    session.buffer = []
-    playlistSessions.set(sessionId, session)
   }
+
+  if (warnLines.length) {
+    await ctx.reply(`⚠️ Qualité réduite sur:\n${warnLines.join('\n')}`)
+  }
+
+  session.buffer = []
+  playlistSessions.set(sessionId, session)
 }
 
 async function handlePasswordFlow(ctx, userId) {
@@ -365,7 +379,7 @@ async function handleDownloadJob(ctx, url, opts = {}) {
     }
 
     if (skipSend) {
-      return { download, qualityInfo }
+      return { download, qualityInfo, size: stats.size }
     }
 
     const inputFile = new InputFile(fs.createReadStream(download.path), download.filename)
