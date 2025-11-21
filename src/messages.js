@@ -54,6 +54,25 @@ module.exports = {
   authLimitReached() {
     return 'dsl bb c full rn, plus de place :('
   },
+  notAdmin() {
+    return 't pas admin bb'
+  },
+  broadcastUsage() {
+    return 'usage: /broadcast ton message ici'
+  },
+  broadcastNoUsers() {
+    return 'ya aucun user autorisé pour recevoir le message'
+  },
+  broadcastResult(sent, failed) {
+    const failLine = failed ? `, ${failed} fail` : ''
+    return `envoyé à ${sent} user${sent === 1 ? '' : 's'}${failLine}`
+  },
+  adminErrorNotice(text) {
+    return `⚠️ Node error:\n${text}`
+  },
+  userIdResponse(id) {
+    return `ton user id: ${id}`
+  },
   genericError() {
     return 'dsl je trouve pas ton bail, check ton lien.'
   },

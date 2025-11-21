@@ -8,6 +8,7 @@ const SOUNDCLOUD_OAUTH_TOKEN =
 const PASSWORD_SEGMENT_SIZE = 25
 const ACCESS_PASSWORDS = readPasswordList()
 const MAX_AUTHORIZED_USERS = ACCESS_PASSWORDS.length * PASSWORD_SEGMENT_SIZE
+const ADMIN_USER_IDS = readAdminList()
 const YT_DLP_BINARY_PATH = process.env.YT_DLP_BINARY_PATH
 const BINARY_CACHE_DIR = path.join(__dirname, '..', 'bin')
 const DATA_DIR = path.join(__dirname, '..', 'data')
@@ -43,6 +44,7 @@ module.exports = {
   ACCESS_PASSWORDS,
   AUTH_STORE_PATH,
   BINARY_CACHE_DIR,
+  ADMIN_USER_IDS,
   BOT_TOKEN,
   DATA_DIR,
   DOWNLOAD_COUNT_PATH,
@@ -104,4 +106,14 @@ function readPasswordList() {
     .split(/[\n,;]+/)
     .map(entry => entry.trim())
     .filter(Boolean)
+}
+
+function readAdminList() {
+  const raw = process.env.ADMIN_USER_IDS
+  if (!raw) return []
+
+  return raw
+    .split(/[\n,;\s]+/)
+    .map(entry => Number.parseInt(entry.trim(), 10))
+    .filter(value => Number.isFinite(value))
 }

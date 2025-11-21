@@ -8,6 +8,7 @@ const fsp = require('node:fs/promises')
 const messages = require('./messages')
 const {
   ACCESS_PASSWORDS,
+  ADMIN_USER_IDS,
   BOT_TOKEN,
   ENABLE_QUALITY_ANALYSIS,
   MAX_AUTHORIZED_USERS,
@@ -49,6 +50,7 @@ const awaitingPassword = new Set()
 const downloadQueue = createTaskQueue(MAX_CONCURRENT_DOWNLOADS, MAX_PENDING_DOWNLOADS)
 let isShuttingDown = false
 const playlistSessions = new Map()
+const adminUserIds = new Set(ADMIN_USER_IDS)
 const PLAYLIST_CHUNK_SIZE = 10
 const PLAYLIST_MAX_ITEMS = 100
 const PLAYLIST_GROUP_SIZE = 10
@@ -62,7 +64,25 @@ function passwordForNextUser() {
   return ACCESS_PASSWORDS[segmentIndex]
 }
 
+function isAdmin(userId) {
+  return typeof userId === 'number' && adminUserIds.has(userId)
+}
+
+async function notifyAdmins(message) {
+  if (!adminUserIds.size) return
+  const sends = []
+  adminUserIds.forEach(id => {
+    sends.push(
+      bot.api
+        .sendMessage(id, message)
+        .catch(error => console.warn('Failed to notify admin', id, error?.message || error))
+    )
+  })
+  await Promise.allSettled(sends)
+}
+
 setupSignalHandlers()
+setupErrorHandlers()
 
 bot.api
   .setMyCommands([{ command: 'start', description: 'Show bot instructions' }])
@@ -86,6 +106,56 @@ bot.command('start', async ctx => {
 
 bot.command('downloads', async ctx => {
   await ctx.reply(messages.downloadCount(getDownloadCount()))
+})
+
+bot.command('userid', async ctx => {
+  const userId = ctx.from?.id
+  if (!userId) {
+    await ctx.reply(messages.userIdMissing())
+    return
+  }
+
+  console.log(`User ID request: ${userId} (username=${ctx.from?.username || 'n/a'})`)
+  await ctx.reply(messages.userIdResponse(userId))
+})
+
+bot.command('broadcast', async ctx => {
+  const userId = ctx.from?.id
+  if (!userId) {
+    await ctx.reply(messages.userIdMissing())
+    return
+  }
+
+  if (!isAdmin(userId)) {
+    await ctx.reply(messages.notAdmin())
+    return
+  }
+
+  const rawText = ctx.message?.text || ''
+  const text = rawText.replace(/^\/broadcast(@\w+)?\s*/i, '').trim()
+  if (!text) {
+    await ctx.reply(messages.broadcastUsage())
+    return
+  }
+
+  if (!authorizedUsers.size) {
+    await ctx.reply(messages.broadcastNoUsers())
+    return
+  }
+
+  let sent = 0
+  let failed = 0
+  for (const targetId of authorizedUsers) {
+    try {
+      await bot.api.sendMessage(targetId, text)
+      sent += 1
+    } catch (error) {
+      failed += 1
+      console.warn('Broadcast send failed:', targetId, error?.message || error)
+    }
+  }
+
+  await ctx.reply(messages.broadcastResult(sent, failed))
 })
 
 bot.on('message:text', async ctx => {
@@ -141,6 +211,7 @@ bot.on('message:text', async ctx => {
 
 bot.catch(err => {
   console.error('Bot error:', err)
+  notifyAdmins(messages.adminErrorNotice(describeError(err))).catch(() => {})
 })
 
 bot.on('callback_query:data', async ctx => {
@@ -405,6 +476,16 @@ function setupSignalHandlers() {
   })
 }
 
+function setupErrorHandlers() {
+  const forward = (label, error) => {
+    console.error(`${label}:`, error)
+    notifyAdmins(messages.adminErrorNotice(describeError(error))).catch(() => {})
+  }
+
+  process.on('unhandledRejection', reason => forward('Unhandled rejection', reason))
+  process.on('uncaughtException', error => forward('Uncaught exception', error))
+}
+
 async function shutdownGracefully(signal) {
   try {
     await bot.stop()
@@ -422,4 +503,23 @@ async function initializeBot() {
   console.log(`Tracks downloaded historically: ${getDownloadCount()}`)
   console.log('Bot is up. Waiting for SoundCloud URLs...')
   await bot.start()
+}
+
+function describeError(error) {
+  if (!error) return 'Unknown error'
+  if (error instanceof Error) {
+    const stack = error.stack || `${error.name || 'Error'}: ${error.message}`
+    return stack.length > 3500 ? stack.slice(0, 3500) + '...' : stack
+  }
+  let text
+  if (typeof error === 'object') {
+    try {
+      text = JSON.stringify(error, null, 2)
+    } catch (_jsonError) {
+      text = String(error)
+    }
+  } else {
+    text = String(error)
+  }
+  return text.length > 3500 ? text.slice(0, 3500) + '...' : text
 }

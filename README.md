@@ -20,6 +20,7 @@ Telegram bot built with [grammY](https://grammy.dev/) that accepts a SoundCloud 
    - `BOT_TOKEN`: Telegram bot token.
    - `SOUNDCLOUD_OAUTH_TOKEN`: OAuth token to authenticate `yt-dlp` requests against SoundCloud (format: `1-123456-abcdef...`). You can also set `SOUNDCLOUD_OAUTH` if you already have that env var in another system.
    - `BOT_PASSWORDS`: Comma-separated list of passwords, one per 25 authorized users (e.g., `firstBatch,nextBatch`). The bot uses the next password every time a block of 25 new users is filled. If you prefer a single password, `BOT_PASSWORD` is still supported as shorthand for the first 25 users only.
+   - `ADMIN_USER_IDS`: Comma/newline/space separated Telegram user IDs allowed to send broadcasts; they also receive forwarded runtime errors when set.
    - *(optional)* `YT_DLP_BINARY_PATH`: Absolute path to a pre-installed `yt-dlp` binary if you do not want the app to download one automatically.
    - *(optional)* `MAX_CONCURRENT_DOWNLOADS`: Limit how many yt-dlp jobs can run at once (default: `3`).
    - *(optional)* `MAX_PENDING_DOWNLOADS`: Maximum queued download jobs waiting for a worker before new requests are rejected (default: `25`).
@@ -38,6 +39,8 @@ The bot runs in long-polling mode and logs startup info to the console.
 ## Usage
 - `/start` – displays quick instructions and, if needed, prompts for the shared password.
 - Reply to the password prompt with the active secret. Passwords advance every 25 new users; if no further passwords are configured the bot will politely say it’s full.
+- `/userid` – prints the caller’s Telegram user id to console and replies with it (handy for whitelisting/admin lists).
+- `/broadcast <text>` – admin-only, sends `<text>` to every authorized user.
 - Send a public SoundCloud track/playlist URL (only the first entry of playlists is fetched). The bot enforces the `http_aac_1_0` format and falls back to the best/original file when that profile is missing. The resulting audio is sent back as a document with the track metadata + cover art embedded.
 
 ## Notes & troubleshooting
@@ -46,5 +49,6 @@ The bot runs in long-polling mode and logs startup info to the console.
 - Authorized user IDs are persisted to `data/authorized-users.json`, so unlocking survives restarts. Delete the file if you need to revoke all users quickly.
 - Concurrency is capped by `MAX_CONCURRENT_DOWNLOADS`; bump it up (e.g., `5`) only if your host has the bandwidth/CPU for multiple yt-dlp processes.
 - Requests beyond `MAX_PENDING_DOWNLOADS` are rejected immediately with a friendly "queue is full" response so the bot cannot be overwhelmed while long transfers are active.
+- If `ADMIN_USER_IDS` is set, unhandled rejections/exceptions and bot errors are forwarded to those admin chats.
 - Spectral quality hints rely on ffmpeg/ffprobe to decode PCM audio and run the Fake Lossless Checker logic inside Node.js, which can take noticeable CPU time. Set `ENABLE_QUALITY_ANALYSIS=false` if you prefer to skip this extra processing, and use `QUALITY_ANALYSIS_DEBUG=true` to troubleshoot missing captions without enabling debug logs globally.
 - FFmpeg is required for embedding album art/metadata. If it’s missing, yt-dlp falls back to plain downloads and the bot will log warnings; install it via `brew install ffmpeg`, `apt install ffmpeg`, etc.
