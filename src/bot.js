@@ -153,8 +153,9 @@ bot.on('callback_query:data', async ctx => {
   }
 
   if (action === 'cont') {
+    session.awaitingPrompt = false
+    playlistSessions.set(sessionId, session)
     await ctx.answerCallbackQuery({ text: 'On continue' })
-    await ctx.editMessageText(messages.playlistChunkPrompt(session.nextIndex, session.tracks.length, PLAYLIST_CHUNK_SIZE))
     enqueueNextTrack(ctx, sessionId)
   }
 })
@@ -176,7 +177,8 @@ async function handlePlaylistRequest(ctx, url) {
     userId: ctx.from.id,
     tracks: entries,
     nextIndex: 0,
-    promptMessageId: null
+    promptMessageId: null,
+    awaitingPrompt: false
   }
   playlistSessions.set(sessionId, session)
   await ctx.reply(messages.playlistDetected(entries.length, PLAYLIST_CHUNK_SIZE, PLAYLIST_MAX_ITEMS))
@@ -194,6 +196,7 @@ async function enqueueNextTrack(ctx, sessionId) {
   }
 
   if (session.nextIndex > 0 && session.nextIndex % PLAYLIST_CHUNK_SIZE === 0) {
+    if (session.awaitingPrompt) return
     const msg = await ctx.reply(
       messages.playlistChunkPrompt(session.nextIndex, session.tracks.length, PLAYLIST_CHUNK_SIZE),
       {
@@ -208,6 +211,7 @@ async function enqueueNextTrack(ctx, sessionId) {
       }
     )
     session.promptMessageId = msg.message_id
+    session.awaitingPrompt = true
     playlistSessions.set(sessionId, session)
     return
   }
