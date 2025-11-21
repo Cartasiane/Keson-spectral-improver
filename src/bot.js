@@ -156,7 +156,7 @@ bot.on('callback_query:data', async ctx => {
     session.awaitingPrompt = false
     playlistSessions.set(sessionId, session)
     await ctx.answerCallbackQuery({ text: 'On continue' })
-    enqueueNextTrack(ctx, sessionId)
+    enqueueNextTrack(ctx, sessionId, true)
   }
 })
 
@@ -185,7 +185,7 @@ async function handlePlaylistRequest(ctx, url) {
   enqueueNextTrack(ctx, sessionId)
 }
 
-async function enqueueNextTrack(ctx, sessionId) {
+async function enqueueNextTrack(ctx, sessionId, force = false) {
   const session = playlistSessions.get(sessionId)
   if (!session) return
 
@@ -195,7 +195,7 @@ async function enqueueNextTrack(ctx, sessionId) {
     return
   }
 
-  if (session.nextIndex > 0 && session.nextIndex % PLAYLIST_CHUNK_SIZE === 0) {
+  if (!force && session.nextIndex > 0 && session.nextIndex % PLAYLIST_CHUNK_SIZE === 0) {
     if (session.awaitingPrompt) return
     const msg = await ctx.reply(
       messages.playlistChunkPrompt(session.nextIndex, session.tracks.length, PLAYLIST_CHUNK_SIZE),
