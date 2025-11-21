@@ -104,10 +104,10 @@ module.exports = {
     return `⚠️ Débit estimé ${measured} kbps.`
   },
   playlistDetected(count, chunkSize, cap) {
-    return `Playlist détectée (${count} titres, limite ${cap}). Je lance ${chunkSize} premiers, puis je te demande si on continue.`
+    return `Playlist spotted de (${count} tracks, limite ${cap}). Je dl les ${chunkSize} premières, puis faudra valider la suite (antispam)`
   },
   playlistNoEntries() {
-    return "Je n'ai trouvé aucun track dans cette playlist. (privée?)"
+    return "No playlist like this bb. (privée?)"
   },
   playlistChunkPrompt(downloaded, total, chunkSize) {
     const remaining = Math.max(total - downloaded, 0)
@@ -115,10 +115,10 @@ module.exports = {
     return `J'ai envoyé ${downloaded}/${total} titres. Continuer avec ${nextCount} de plus ?`
   },
   playlistDone() {
-    return 'Playlist terminée.'
+    return 'Playlist viday.'
   },
   playlistStopped() {
-    return 'Ok, j’arrête la playlist.'
+    return 'Ok, c terminé entre nous.'
   },
   opusOnlyMessage() {
     return 'Impossible de DL en opus bb, trouve une autre version.'
