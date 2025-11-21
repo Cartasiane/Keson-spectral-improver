@@ -97,11 +97,11 @@ module.exports = {
   bitrateLine(measured, source, warning) {
     return warning || ''
   },
-  bitrateDropWarning(measured, source) {
-    return `⚠️ Débit estimé ${measured} kbps, l'uploader a probablement up un fichier perrave :(`
+  bitrateDropWarning(trackLabel, measured, source) {
+    return `⚠️ ${trackLabel}: débit estimé ${measured} kbps (source ${source} kbps?). L'uploader a probablement up un fichier perrave :(`
   },
-  lowBitrateWarning(measured, min = 256) {
-    return `⚠️ Débit estimé ${measured} kbps.`
+  lowBitrateWarning(trackLabel, measured, min = 256) {
+    return `⚠️ ${trackLabel}: débit estimé ${measured} kbps (<${min} kbps recommandé).`
   },
   playlistDetected(count, chunkSize, cap) {
     return `Playlist spotted de (${count} tracks, limite ${cap}). Je dl les ${chunkSize} premières, puis faudra valider la suite (antispam)`

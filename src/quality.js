@@ -21,15 +21,17 @@ async function analyzeTrackQuality(filePath, metadata) {
   if (!measured) return null
 
   const source = pickSourceBitrate(metadata)
-  const warnings = []
-  if (source && measured + 5 < source) {
-    warnings.push(messages.bitrateDropWarning(measured, source))
-  }
-  if (measured < LOW_BITRATE_THRESHOLD) {
-    warnings.push(messages.lowBitrateWarning(measured, LOW_BITRATE_THRESHOLD))
-  }
+  const trackLabel = describeTrack(metadata)
 
-  const warning = warnings.length ? warnings.join(' ') : null
+  let warning = null
+  const hasDropIssue = source && measured + 5 < source
+  const hasLowIssue = measured < LOW_BITRATE_THRESHOLD
+
+  if (hasDropIssue) {
+    warning = messages.bitrateDropWarning(trackLabel, measured, source)
+  } else if (hasLowIssue) {
+    warning = messages.lowBitrateWarning(trackLabel, measured, LOW_BITRATE_THRESHOLD)
+  }
 
   const text = warning || null
 
@@ -57,6 +59,15 @@ function pickSourceBitrate(metadata) {
     if (Number.isFinite(n) && n > 0) return Math.round(n)
   }
   return null
+}
+
+function describeTrack(metadata) {
+  if (!metadata || typeof metadata !== 'object') return 'ce track'
+  const title = metadata.title || metadata.fulltitle || metadata.track
+  const artist = metadata.uploader || metadata.artist
+  if (title && artist) return `${artist} – ${title}`
+  if (title) return title
+  return 'ce track'
 }
 
 async function measureBitrateKbps(filePath) {

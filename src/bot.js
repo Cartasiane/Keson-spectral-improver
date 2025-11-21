@@ -81,6 +81,13 @@ async function notifyAdmins(message) {
   await Promise.allSettled(sends)
 }
 
+function shouldNotifyAdmin(error) {
+  if (!error) return true
+  if (error.userMessage) return false // user-facing issues we already message
+  if (error.code === 'QUEUE_FULL') return false
+  return true
+}
+
 setupSignalHandlers()
 setupErrorHandlers()
 
@@ -205,6 +212,9 @@ bot.on('message:text', async ctx => {
     await downloadQueue.add(() => handleDownloadJob(ctx, url))
   } catch (error) {
     console.error('Download failed:', error)
+    if (shouldNotifyAdmin(error)) {
+      notifyAdmins(messages.adminErrorNotice(describeError(error))).catch(() => {})
+    }
     await ctx.reply(formatUserFacingError(error))
   }
 })
@@ -321,6 +331,9 @@ async function enqueueNextTrack(ctx, sessionId, force = false) {
     await enqueueNextTrack(ctx, sessionId)
   } catch (error) {
     console.error('Playlist track failed:', error)
+    if (shouldNotifyAdmin(error)) {
+      notifyAdmins(messages.adminErrorNotice(describeError(error))).catch(() => {})
+    }
     await ctx.reply(formatUserFacingError(error))
     // if queue full, stop playlist
     if (error?.code === 'QUEUE_FULL') {
