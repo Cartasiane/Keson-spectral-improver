@@ -8,6 +8,7 @@ const {
   FFPROBE_PATH,
   QUALITY_ANALYSIS_DEBUG
 } = require('./config')
+const LOW_BITRATE_THRESHOLD = 256
 
 /**
  * Analyze bitrate using the external Python CLI "whatsmybitrate".
@@ -20,12 +21,17 @@ async function analyzeTrackQuality(filePath, metadata) {
   if (!measured) return null
 
   const source = pickSourceBitrate(metadata)
-  const warning =
-    source && measured + 5 < source
-      ? messages.bitrateDropWarning(measured, source)
-      : null
+  const warnings = []
+  if (source && measured + 5 < source) {
+    warnings.push(messages.bitrateDropWarning(measured, source))
+  }
+  if (measured < LOW_BITRATE_THRESHOLD) {
+    warnings.push(messages.lowBitrateWarning(measured, LOW_BITRATE_THRESHOLD))
+  }
 
-  const text = messages.bitrateLine(measured, source, warning)
+  const warning = warnings.length ? warnings.join(' ') : null
+
+  const text = warning || null
 
   return {
     bitrate_kbps: measured,
