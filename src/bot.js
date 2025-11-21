@@ -49,6 +49,7 @@ let isShuttingDown = false
 const playlistSessions = new Map()
 const PLAYLIST_CHUNK_SIZE = 10
 const PLAYLIST_MAX_ITEMS = 100
+const PLAYLIST_GROUP_SIZE = 10
 
 setupSignalHandlers()
 
@@ -178,7 +179,8 @@ async function handlePlaylistRequest(ctx, url) {
     tracks: entries,
     nextIndex: 0,
     promptMessageId: null,
-    awaitingPrompt: false
+    awaitingPrompt: false,
+    buffer: []
   }
   playlistSessions.set(sessionId, session)
   await ctx.reply(messages.playlistDetected(entries.length, PLAYLIST_CHUNK_SIZE, PLAYLIST_MAX_ITEMS))
@@ -190,6 +192,9 @@ async function enqueueNextTrack(ctx, sessionId, force = false) {
   if (!session) return
 
   if (session.nextIndex >= session.tracks.length) {
+    if (session.buffer.length) {
+      await sendPlaylistGroup(ctx, sessionId)
+    }
     await ctx.reply(messages.playlistDone())
     playlistSessions.delete(sessionId)
     return
@@ -221,7 +226,20 @@ async function enqueueNextTrack(ctx, sessionId, force = false) {
   playlistSessions.set(sessionId, session)
 
   try {
-    await downloadQueue.add(() => handleDownloadJob(ctx, trackUrl))
+    await downloadQueue.add(async () => {
+      const result = await handleDownloadJob(ctx, trackUrl, { skipSend: true })
+      if (!result) return
+      session.buffer.push({
+        download: result.download,
+        qualityInfo: result.qualityInfo
+      })
+      if (
+        session.buffer.length >= PLAYLIST_GROUP_SIZE ||
+        session.nextIndex >= session.tracks.length
+      ) {
+        await sendPlaylistGroup(ctx, sessionId)
+      }
+    })
     await enqueueNextTrack(ctx, sessionId)
   } catch (error) {
     console.error('Playlist track failed:', error)
@@ -232,6 +250,45 @@ async function enqueueNextTrack(ctx, sessionId, force = false) {
       return
     }
     await enqueueNextTrack(ctx, sessionId)
+  }
+}
+
+async function sendPlaylistGroup(ctx, sessionId) {
+  const session = playlistSessions.get(sessionId)
+  if (!session || !session.buffer.length) return
+
+  const media = session.buffer.map((item, idx) => {
+    const inputFile = new InputFile(
+      fs.createReadStream(item.download.path),
+      item.download.filename
+    )
+    const caption = idx === 0 ? buildCaption(item.download.metadata, item.qualityInfo) : undefined
+    return {
+      type: 'document',
+      media: inputFile,
+      caption
+    }
+  })
+
+  const warnLines = []
+
+  try {
+    await ctx.replyWithMediaGroup(media)
+    for (const item of session.buffer) {
+      if (item.qualityInfo?.warning) {
+        const meta = item.download.metadata || {}
+        const name = meta.title || meta.fulltitle || item.download.filename
+        warnLines.push(`- ${name}: ${item.qualityInfo.warning}`)
+      }
+      incrementDownloadCount()
+      await cleanupTempDir(item.download.tempDir)
+    }
+    if (warnLines.length) {
+      await ctx.reply(`⚠️ Qualité réduite sur:\n${warnLines.join('\n')}`)
+    }
+  } finally {
+    session.buffer = []
+    playlistSessions.set(sessionId, session)
   }
 }
 
@@ -263,13 +320,16 @@ async function promptForPassword(ctx, userId) {
   await ctx.reply(messages.promptPassword())
 }
 
-async function handleDownloadJob(ctx, url) {
+async function handleDownloadJob(ctx, url, opts = {}) {
+  const skipSend = opts.skipSend === true
   let download
   try {
     download = await downloadTrack(url)
     const stats = await fsp.stat(download.path)
     if (stats.size > TELEGRAM_MAX_FILE_BYTES) {
-      await ctx.reply(messages.fileTooLarge())
+      if (!skipSend) {
+        await ctx.reply(messages.fileTooLarge())
+      }
       return
     }
 
@@ -290,6 +350,10 @@ async function handleDownloadJob(ctx, url) {
       qualityDebug('Quality analysis disabled via ENABLE_QUALITY_ANALYSIS=false; skipping probe.')
     }
 
+    if (skipSend) {
+      return { download, qualityInfo }
+    }
+
     const inputFile = new InputFile(fs.createReadStream(download.path), download.filename)
     await ctx.replyWithDocument(inputFile, {
       caption: buildCaption(download.metadata, qualityInfo)
@@ -299,7 +363,7 @@ async function handleDownloadJob(ctx, url) {
     }
     incrementDownloadCount()
   } finally {
-    if (download) {
+    if (download && !skipSend) {
       await cleanupTempDir(download.tempDir)
     }
   }
