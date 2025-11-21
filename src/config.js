@@ -5,7 +5,9 @@ const path = require('node:path')
 const BOT_TOKEN = process.env.BOT_TOKEN
 const SOUNDCLOUD_OAUTH_TOKEN =
   process.env.SOUNDCLOUD_OAUTH_TOKEN || process.env.SOUNDCLOUD_OAUTH
-const ACCESS_PASSWORD = process.env.BOT_PASSWORD
+const PASSWORD_SEGMENT_SIZE = 25
+const ACCESS_PASSWORDS = readPasswordList()
+const MAX_AUTHORIZED_USERS = ACCESS_PASSWORDS.length * PASSWORD_SEGMENT_SIZE
 const YT_DLP_BINARY_PATH = process.env.YT_DLP_BINARY_PATH
 const BINARY_CACHE_DIR = path.join(__dirname, '..', 'bin')
 const DATA_DIR = path.join(__dirname, '..', 'data')
@@ -38,7 +40,7 @@ const THUMB_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp'])
 const INFO_SUFFIX = '.info.json'
 
 module.exports = {
-  ACCESS_PASSWORD,
+  ACCESS_PASSWORDS,
   AUTH_STORE_PATH,
   BINARY_CACHE_DIR,
   BOT_TOKEN,
@@ -51,8 +53,10 @@ module.exports = {
   IDHS_REQUEST_TIMEOUT_MS,
   IDHS_SUPPORTED_HOSTS,
   INFO_SUFFIX,
+  MAX_AUTHORIZED_USERS,
   MAX_CONCURRENT_DOWNLOADS,
   MAX_PENDING_DOWNLOADS,
+  PASSWORD_SEGMENT_SIZE,
   QUALITY_ANALYSIS_DEBUG,
   SHUTDOWN_SIGNALS,
   SOUND_CLOUD_REGEX,
@@ -78,8 +82,8 @@ function validateRequiredEnv() {
     process.exit(1)
   }
 
-  if (!ACCESS_PASSWORD) {
-    console.error('BOT_PASSWORD is missing. Set it to protect the bot access.')
+  if (!ACCESS_PASSWORDS.length) {
+    console.error('BOT_PASSWORDS (or BOT_PASSWORD) is missing. Set at least one password.')
     process.exit(1)
   }
 }
@@ -90,4 +94,14 @@ function readPositiveInt(value, fallback) {
     return parsed
   }
   return fallback
+}
+
+function readPasswordList() {
+  const raw = process.env.BOT_PASSWORDS || process.env.BOT_PASSWORD
+  if (!raw) return []
+
+  return raw
+    .split(/[\n,;]+/)
+    .map(entry => entry.trim())
+    .filter(Boolean)
 }

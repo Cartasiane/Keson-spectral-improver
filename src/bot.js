@@ -7,12 +7,14 @@ const fs = require('node:fs')
 const fsp = require('node:fs/promises')
 const messages = require('./messages')
 const {
-  ACCESS_PASSWORD,
+  ACCESS_PASSWORDS,
   BOT_TOKEN,
   ENABLE_QUALITY_ANALYSIS,
+  MAX_AUTHORIZED_USERS,
   MAX_CONCURRENT_DOWNLOADS,
   MAX_PENDING_DOWNLOADS,
   QUALITY_ANALYSIS_DEBUG,
+  PASSWORD_SEGMENT_SIZE,
   SHUTDOWN_SIGNALS,
   TELEGRAM_MAX_FILE_BYTES,
   validateRequiredEnv
@@ -50,6 +52,15 @@ const playlistSessions = new Map()
 const PLAYLIST_CHUNK_SIZE = 10
 const PLAYLIST_MAX_ITEMS = 100
 const PLAYLIST_GROUP_SIZE = 10
+
+function isAuthCapacityReached() {
+  return ACCESS_PASSWORDS.length === 0 || authorizedUsers.size >= MAX_AUTHORIZED_USERS
+}
+
+function passwordForNextUser() {
+  const segmentIndex = Math.floor(authorizedUsers.size / PASSWORD_SEGMENT_SIZE)
+  return ACCESS_PASSWORDS[segmentIndex]
+}
 
 setupSignalHandlers()
 
@@ -253,69 +264,41 @@ async function sendPlaylistGroup(ctx, sessionId) {
   const session = playlistSessions.get(sessionId)
   if (!session || !session.buffer.length) return
 
-  const warnLines = []
-
   while (session.buffer.length) {
-    let batchSize = 0
-    const batch = []
-    while (session.buffer.length) {
-      const item = session.buffer[0]
-      if (batch.length > 0 && batchSize + item.size > TELEGRAM_MAX_FILE_BYTES) break
-      session.buffer.shift()
-      batch.push(item)
-      batchSize += item.size
-    }
+    const item = session.buffer.shift()
+    if (!item) break
+    const inputFile = new InputFile(
+      fs.createReadStream(item.download.path),
+      item.download.filename
+    )
+    const caption = buildCaption(item.download.metadata, item.qualityInfo)
+    await ctx.replyWithDocument(inputFile, { caption })
 
-    const media = batch.map((item, idx) => {
-      const inputFile = new InputFile(
-        fs.createReadStream(item.download.path),
-        item.download.filename
-      )
-      const caption = idx === 0 ? buildCaption(item.download.metadata, item.qualityInfo) : undefined
-      return {
-        type: 'document',
-        media: inputFile,
-        caption
-      }
-    })
-
-    try {
-      await ctx.replyWithMediaGroup(media)
-    } catch (error) {
-      if (error?.description && /entity too large/i.test(error.description)) {
-        for (const item of batch) {
-          const inputFile = new InputFile(
-            fs.createReadStream(item.download.path),
-            item.download.filename
-          )
-          const caption = buildCaption(item.download.metadata, item.qualityInfo)
-          await ctx.replyWithDocument(inputFile, { caption })
-        }
-      } else {
-        throw error
-      }
-    } finally {
-      for (const item of batch) {
-      if (item.qualityInfo?.warning) {
-        const meta = item.download.metadata || {}
-        const name = meta.title || meta.fulltitle || item.download.filename
-        warnLines.push(`- ${name}`)
-      }
-        incrementDownloadCount()
-        await cleanupTempDir(item.download.tempDir)
-      }
+    if (item.qualityInfo?.warning) {
+      await ctx.reply(item.qualityInfo.warning)
     }
+    incrementDownloadCount()
+    await cleanupTempDir(item.download.tempDir)
   }
-
-    if (warnLines.length) {
-      await ctx.reply(`⚠️ Qualité réduite sur:\n${warnLines.join('\n')}`)
-    }
 
   session.buffer = []
   playlistSessions.set(sessionId, session)
 }
 
 async function handlePasswordFlow(ctx, userId) {
+  if (isAuthCapacityReached()) {
+    awaitingPassword.delete(userId)
+    await ctx.reply(messages.authLimitReached())
+    return
+  }
+
+  const expectedPassword = passwordForNextUser()
+  if (!expectedPassword) {
+    awaitingPassword.delete(userId)
+    await ctx.reply(messages.authLimitReached())
+    return
+  }
+
   const text = (ctx.message.text || '').trim()
 
   if (awaitingPassword.has(userId)) {
@@ -324,7 +307,7 @@ async function handlePasswordFlow(ctx, userId) {
       return
     }
 
-    if (text === ACCESS_PASSWORD) {
+    if (text === expectedPassword) {
       awaitingPassword.delete(userId)
       addAuthorizedUser(userId)
       await ctx.reply(messages.passwordAccepted())
@@ -339,6 +322,12 @@ async function handlePasswordFlow(ctx, userId) {
 }
 
 async function promptForPassword(ctx, userId) {
+  if (isAuthCapacityReached()) {
+    awaitingPassword.delete(userId)
+    await ctx.reply(messages.authLimitReached())
+    return
+  }
+
   awaitingPassword.add(userId)
   await ctx.reply(messages.promptPassword())
 }

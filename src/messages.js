@@ -51,6 +51,9 @@ module.exports = {
   passwordRejected() {
     return 'pas le bon mdp lol'
   },
+  authLimitReached() {
+    return 'dsl bb c full rn, plus de place :('
+  },
   genericError() {
     return 'dsl je trouve pas ton bail, check ton lien.'
   },

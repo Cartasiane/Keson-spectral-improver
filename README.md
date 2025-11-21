@@ -1,6 +1,6 @@
 # Keson Spectral Improver
 
-Telegram bot built with [grammY](https://grammy.dev/) that accepts a SoundCloud URL, downloads the track via `yt-dlp` using an OAuth token (preferring the `http_aac_1_0` audio profile or the original file when available), and sends the audio file back to the user. Brand-new users must unlock the bot with a shared password before they can request downloads.
+Telegram bot built with [grammY](https://grammy.dev/) that accepts a SoundCloud URL, downloads the track via `yt-dlp` using an OAuth token (preferring the `http_aac_1_0` audio profile or the original file when available), and sends the audio file back to the user. Brand-new users must unlock the bot with a password (or a list of passwords, one per 25-user block) before they can request downloads.
 
 ## Requirements
 - Node.js 18+
@@ -19,7 +19,7 @@ Telegram bot built with [grammY](https://grammy.dev/) that accepts a SoundCloud 
    ```
    - `BOT_TOKEN`: Telegram bot token.
    - `SOUNDCLOUD_OAUTH_TOKEN`: OAuth token to authenticate `yt-dlp` requests against SoundCloud (format: `1-123456-abcdef...`). You can also set `SOUNDCLOUD_OAUTH` if you already have that env var in another system.
-   - `BOT_PASSWORD`: Shared password that users must reply with when the bot prompts them to unlock downloads.
+   - `BOT_PASSWORDS`: Comma-separated list of passwords, one per 25 authorized users (e.g., `firstBatch,nextBatch`). The bot uses the next password every time a block of 25 new users is filled. If you prefer a single password, `BOT_PASSWORD` is still supported as shorthand for the first 25 users only.
    - *(optional)* `YT_DLP_BINARY_PATH`: Absolute path to a pre-installed `yt-dlp` binary if you do not want the app to download one automatically.
    - *(optional)* `MAX_CONCURRENT_DOWNLOADS`: Limit how many yt-dlp jobs can run at once (default: `3`).
    - *(optional)* `MAX_PENDING_DOWNLOADS`: Maximum queued download jobs waiting for a worker before new requests are rejected (default: `25`).
@@ -37,7 +37,7 @@ The bot runs in long-polling mode and logs startup info to the console.
 
 ## Usage
 - `/start` – displays quick instructions and, if needed, prompts for the shared password.
-- Reply to the password prompt with the shared secret (one-time unlock per user; persisted across restarts).
+- Reply to the password prompt with the active secret. Passwords advance every 25 new users; if no further passwords are configured the bot will politely say it’s full.
 - Send a public SoundCloud track/playlist URL (only the first entry of playlists is fetched). The bot enforces the `http_aac_1_0` format and falls back to the best/original file when that profile is missing. The resulting audio is sent back as a document with the track metadata + cover art embedded.
 
 ## Notes & troubleshooting
