@@ -15,6 +15,10 @@ function buildCaption(metadata, qualityInfo) {
 
 function appendQuality(caption, qualityInfo) {
   if (!qualityInfo?.text) return caption
+  // Avoid duplicating warning text in caption; it is sent separately.
+  if (qualityInfo.warning && qualityInfo.text === qualityInfo.warning) {
+    return caption
+  }
   return `${caption}\n${messages.qualityLine(qualityInfo.text)}`
 }
 
