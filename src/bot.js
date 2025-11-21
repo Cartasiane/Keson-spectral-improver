@@ -188,7 +188,16 @@ bot.on('message:text', async ctx => {
     const candidate = extractFirstUrl(messageText)
     if (candidate && isIdhsSupportedLink(candidate)) {
       await ctx.reply(messages.conversionInProgress())
-      url = await resolveLinkViaIdhs(candidate)
+      try {
+        url = await resolveLinkViaIdhs(candidate)
+      } catch (error) {
+        console.error('IDHS resolve failed:', error)
+        if (shouldNotifyAdmin(error)) {
+          notifyAdmins(messages.adminErrorNotice(describeError(error))).catch(() => {})
+        }
+        await ctx.reply(messages.genericError())
+        return
+      }
       if (!url) {
         await ctx.reply(messages.conversionNotFound())
         return

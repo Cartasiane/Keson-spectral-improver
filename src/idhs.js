@@ -17,7 +17,7 @@ async function resolveLinkViaIdhs(originalLink) {
     endpoint = new URL('/api/search?v=1', IDHS_API_BASE_URL)
   } catch (error) {
     console.error('Invalid IDHS base URL:', error)
-    return null
+    throw error
   }
 
   const body = JSON.stringify({ link: originalLink, adapters: ['soundCloud'] })
@@ -45,7 +45,7 @@ async function resolveLinkViaIdhs(originalLink) {
     return pickSoundCloudLink(parsed)
   } catch (error) {
     console.error('Failed to resolve link via IDHS:', error)
-    return null
+    throw error
   }
 }
 
